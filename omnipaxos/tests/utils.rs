@@ -740,7 +740,7 @@ pub mod omnireplica {
     use omnipaxos::{
         ballot_leader_election::Ballot,
         messages::Message,
-        util::{LogEntry, NodeId},
+        util::{EntryRead, NodeId},
         OmniPaxos,
     };
     use std::collections::{HashMap, HashSet};
@@ -818,7 +818,7 @@ pub mod omnireplica {
             }
         }
 
-        pub fn read_decided_log(&self) -> Vec<LogEntry<Value>> {
+        pub fn read_decided_log(&self) -> Vec<EntryRead<Value>> {
             self.paxos.read_decided_suffix(0).unwrap()
         }
 
@@ -877,16 +877,16 @@ pub mod omnireplica {
             if let Some(entries) = self.paxos.read_decided_suffix(self.decided_idx) {
                 for e in entries {
                     match e {
-                        LogEntry::Decided(i) => {
+                        EntryRead::Decided(i) => {
                             self.try_answer_decided_future(i.id);
                         }
-                        LogEntry::Snapshotted(s) => {
+                        EntryRead::Snapshotted(s) => {
                             // Reply futures that were trimmed away
                             for id in s.snapshot.snapshotted.iter().map(|x| x.id) {
                                 self.try_answer_decided_future(id)
                             }
                         }
-                        LogEntry::StopSign(_ss, _is_decided) => {
+                        EntryRead::StopSign(_ss, _is_decided) => {
                             self.try_answer_decided_future(STOPSIGN_ID);
                         }
                         err => panic!("{}", format!("Got unexpected entry: {:?}", err)),
@@ -998,7 +998,7 @@ pub mod verification {
     use super::{Value, ValueSnapshot};
     use omnipaxos::{
         storage::{Snapshot, StopSign},
-        util::{LogEntry, NodeId},
+        util::{EntryRead, NodeId},
     };
 
     /// Verify that the log matches the proposed values, Depending on
@@ -1006,15 +1006,15 @@ pub mod verification {
     /// * All entries are decided, verify the decided entries
     /// * Only a snapshot was taken, verify the snapshot
     /// * A snapshot was taken and entries decided on afterwards, verify both the snapshot and entries
-    pub fn verify_log(read_log: Vec<LogEntry<Value>>, proposals: Vec<Value>) {
+    pub fn verify_log(read_log: Vec<EntryRead<Value>>, proposals: Vec<Value>) {
         let num_proposals = proposals.len();
         match &read_log[..] {
-            [LogEntry::Decided(_), ..] => verify_entries(&read_log, &proposals, 0, num_proposals),
-            [LogEntry::Snapshotted(s)] => {
+            [EntryRead::Decided(_), ..] => verify_entries(&read_log, &proposals, 0, num_proposals),
+            [EntryRead::Snapshotted(s)] => {
                 let exp_snapshot = ValueSnapshot::create(proposals.as_slice());
                 verify_snapshot(&read_log, s.trimmed_idx, &exp_snapshot);
             }
-            [LogEntry::Snapshotted(s), LogEntry::Decided(_), ..] => {
+            [EntryRead::Snapshotted(s), EntryRead::Decided(_), ..] => {
                 let (snapshotted_proposals, last_proposals) = proposals.split_at(s.trimmed_idx);
                 let (snapshot_entry, decided_entries) = read_log.split_at(1); // separate the snapshot from the decided entries
                 let exp_snapshot = ValueSnapshot::create(snapshotted_proposals);
@@ -1032,7 +1032,7 @@ pub mod verification {
 
     /// Verify that the log has a single snapshot of the latest entry.
     pub fn verify_snapshot(
-        read_entries: &[LogEntry<Value>],
+        read_entries: &[EntryRead<Value>],
         exp_compacted_idx: usize,
         exp_snapshot: &ValueSnapshot,
     ) {
@@ -1046,7 +1046,7 @@ pub mod verification {
             .first()
             .expect("Expected entry from first element")
         {
-            LogEntry::Snapshotted(s) => {
+            EntryRead::Snapshotted(s) => {
                 assert_eq!(s.trimmed_idx, exp_compacted_idx);
                 assert_eq!(&s.snapshot, exp_snapshot);
             }
@@ -1058,7 +1058,7 @@ pub mod verification {
 
     /// Verify that all log entries are decided and matches the proposed entries.
     pub fn verify_entries(
-        read_entries: &[LogEntry<Value>],
+        read_entries: &[EntryRead<Value>],
         exp_entries: &[Value],
         offset: usize,
         decided_idx: usize,
@@ -1073,8 +1073,8 @@ pub mod verification {
         for (idx, entry) in read_entries.iter().enumerate() {
             let log_idx = idx + offset;
             match entry {
-                LogEntry::Decided(i) if log_idx < decided_idx => assert_eq!(*i, exp_entries[idx]),
-                LogEntry::Undecided(i) if log_idx >= decided_idx => {
+                EntryRead::Decided(i) if log_idx < decided_idx => assert_eq!(*i, exp_entries[idx]),
+                EntryRead::Undecided(i) if log_idx >= decided_idx => {
                     assert_eq!(*i, exp_entries[idx])
                 }
                 e => panic!(
@@ -1089,7 +1089,7 @@ pub mod verification {
     }
 
     /// Verify that the log entry contains only a stopsign matching `exp_stopsign`
-    pub fn verify_stopsign(read_entries: &[LogEntry<Value>], exp_stopsign: &StopSign) {
+    pub fn verify_stopsign(read_entries: &[EntryRead<Value>], exp_stopsign: &StopSign) {
         assert_eq!(
             read_entries.len(),
             1,
@@ -1097,7 +1097,7 @@ pub mod verification {
             read_entries
         );
         match read_entries.first().unwrap() {
-            LogEntry::StopSign(ss, _is_decided) => {
+            EntryRead::StopSign(ss, _is_decided) => {
                 assert_eq!(ss, exp_stopsign);
             }
             e => {
@@ -1108,14 +1108,14 @@ pub mod verification {
 
     /// Verifies that there is a majority when an entry is proposed.
     pub fn check_quorum(
-        logs: &[(NodeId, Vec<LogEntry<Value>>)],
+        logs: &[(NodeId, Vec<EntryRead<Value>>)],
         quorum_size: usize,
         proposals: &[Value],
     ) {
         for v in proposals {
             let num_nodes: usize = logs
                 .iter()
-                .filter(|(_pid, log)| log.contains(&LogEntry::Decided(v.clone())))
+                .filter(|(_pid, log)| log.contains(&EntryRead::Decided(v.clone())))
                 .count();
             let timed_out_proposal = num_nodes == 0;
             if !timed_out_proposal {
@@ -1129,10 +1129,10 @@ pub mod verification {
     }
 
     /// Verifies that only proposed values are decided.
-    pub fn check_validity(logs: &[(NodeId, Vec<LogEntry<Value>>)], proposals: &[Value]) {
+    pub fn check_validity(logs: &[(NodeId, Vec<EntryRead<Value>>)], proposals: &[Value]) {
         logs.iter().for_each(|(_pid, log)| {
             for entry in log {
-                if let LogEntry::Decided(v) = entry {
+                if let EntryRead::Decided(v) = entry {
                     assert!(
                         proposals.contains(v),
                         "Node decided unproposed value: {:?}",
@@ -1144,7 +1144,7 @@ pub mod verification {
     }
 
     /// Verifies logs do not diverge. **NOTE**: this check assumes normal execution within one round without any snapshots, trimming.
-    pub fn check_consistent_log_prefixes(logs: &Vec<(NodeId, Vec<LogEntry<Value>>)>) {
+    pub fn check_consistent_log_prefixes(logs: &Vec<(NodeId, Vec<EntryRead<Value>>)>) {
         let (_, longest_log) = logs
             .iter()
             .max_by(|(_, sr), (_, other_sr)| sr.len().cmp(&other_sr.len()))

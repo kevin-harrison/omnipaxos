@@ -1,7 +1,7 @@
 use crate::{kv::KeyValue, server::OmniPaxosServer, util::*};
 use omnipaxos::{
     messages::Message,
-    util::{LogEntry, NodeId},
+    util::{EntryRead, NodeId},
     *,
 };
 use omnipaxos_storage::memory_storage::MemoryStorage;
@@ -123,7 +123,7 @@ fn main() {
 
     let mut simple_kv_store = HashMap::new();
     for ent in committed_ents {
-        if let LogEntry::Decided(kv) = ent {
+        if let EntryRead::Decided(kv) = ent {
             simple_kv_store.insert(kv.key, kv.value);
         }
         // ignore uncommitted entries
@@ -158,7 +158,7 @@ fn main() {
         .read_decided_suffix(2)
         .expect("Failed to read expected entries");
     for ent in committed_ents {
-        if let LogEntry::Decided(kv) = ent {
+        if let EntryRead::Decided(kv) = ent {
             simple_kv_store.insert(kv.key, kv.value);
         }
         // ignore uncommitted entries

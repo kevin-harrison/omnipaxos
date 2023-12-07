@@ -3,10 +3,10 @@ use crate::{
     errors::{valid_config, ConfigError},
     messages::Message,
     sequence_paxos::SequencePaxos,
-    storage::{Entry, StopSign, Storage},
+    storage::{Entry, StopSign, Storage, LogEntry},
     util::{
         defaults::{BUFFER_SIZE, ELECTION_TIMEOUT, FLUSH_BATCH_TIMEOUT, RESEND_MESSAGE_TIMEOUT},
-        ConfigurationId, FlexibleQuorum, LogEntry, LogicalClock, NodeId,
+        ConfigurationId, FlexibleQuorum, EntryRead, LogicalClock, NodeId,
     },
     utils::{ui, ui::ClusterState},
 };
@@ -300,7 +300,7 @@ where
     }
 
     /// Read entry at index `idx` in the log. Returns `None` if `idx` is out of bounds.
-    pub fn read(&self, idx: usize) -> Option<LogEntry<T>> {
+    pub fn read(&self, idx: usize) -> Option<EntryRead<T>> {
         match self
             .seq_paxos
             .internal_storage
@@ -313,7 +313,7 @@ where
     }
 
     /// Read entries in the range `r` in the log. Returns `None` if `r` is out of bounds.
-    pub fn read_entries<R>(&self, r: R) -> Option<Vec<LogEntry<T>>>
+    pub fn read_entries<R>(&self, r: R) -> Option<Vec<EntryRead<T>>>
     where
         R: RangeBounds<usize>,
     {
@@ -324,7 +324,7 @@ where
     }
 
     /// Read all decided entries from `from_idx` in the log. Returns `None` if `from_idx` is out of bounds.
-    pub fn read_decided_suffix(&self, from_idx: usize) -> Option<Vec<LogEntry<T>>> {
+    pub fn read_decided_suffix(&self, from_idx: usize) -> Option<Vec<EntryRead<T>>> {
         self.seq_paxos
             .internal_storage
             .read_decided_suffix(from_idx)
@@ -341,7 +341,7 @@ where
 
     /// Returns whether this Sequence Paxos has been reconfigured
     pub fn is_reconfigured(&self) -> Option<StopSign> {
-        self.seq_paxos.is_reconfigured()
+        self.seq_paxos.is_stopped()
     }
 
     /// Append an entry to the replicated log.
@@ -357,6 +357,7 @@ where
         &mut self,
         new_configuration: ClusterConfig,
         metadata: Option<Vec<u8>>,
+        use_joint_consensus: bool
     ) -> Result<(), ProposeErr<T>> {
         if let Err(config_error) = new_configuration.validate() {
             return Err(ProposeErr::ConfigError(
@@ -365,7 +366,11 @@ where
                 metadata,
             ));
         }
-        self.seq_paxos.reconfigure(new_configuration, metadata)
+        if use_joint_consensus {
+            self.seq_paxos.reconfigure_joint_consensus(new_configuration)
+        } else {
+            self.seq_paxos.reconfigure(new_configuration, metadata)
+        }
     }
 
     /// Handles re-establishing a connection to a previously disconnected peer.

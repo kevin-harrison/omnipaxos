@@ -1,3 +1,5 @@
+use crate::storage::{LogEntry, QuorumConfig};
+
 use super::{
     ballot_leader_election::Ballot,
     messages::sequence_paxos::Promise,
@@ -93,7 +95,11 @@ impl<T> LeaderState<T>
 where
     T: Entry,
 {
-    pub fn with(n_leader: Ballot, max_pid: usize, quorum: Quorum) -> Self {
+    pub fn with(n_leader: Ballot, max_pid: usize, quorum_config: QuorumConfig) -> Self {
+        let quorum = match quorum_config {
+            QuorumConfig::Stable(quorum) => quorum,
+            QuorumConfig::Transitional(quorum, _) => quorum,
+        };
         Self {
             n_leader,
             promises_meta: vec![PromiseState::NotPromised; max_pid],
@@ -247,6 +253,13 @@ where
         *self.accepted_indexes.get(Self::pid_to_idx(pid)).unwrap()
     }
 
+    pub fn update_quorum(&mut self, quorum_config: QuorumConfig) {
+        match quorum_config {
+            QuorumConfig::Stable(quorum) => self.quorum = quorum,
+            QuorumConfig::Transitional(quorum, _) => self.quorum = quorum,
+        }
+    }
+
     pub fn is_chosen(&self, idx: usize) -> bool {
         let num_accepted = self
             .accepted_indexes
@@ -259,14 +272,16 @@ where
 
 /// The entry read in the log.
 #[derive(Debug, Clone)]
-pub enum LogEntry<T>
-where
-    T: Entry,
+pub enum EntryRead<T: Entry>
 {
     /// The entry is decided.
     Decided(T),
     /// The entry is NOT decided. Might be removed from the log at a later time.
     Undecided(T),
+    /// The quorum config entry is decided.
+    DecidedQuorumConfig(QuorumConfig),
+    /// The quorum config entry is NOT decided. Might be removed from the log at a later time.
+    UndecidedQuorumConfig(QuorumConfig),
     /// The entry has been trimmed.
     Trimmed(TrimmedIndex),
     /// The entry has been snapshotted.
@@ -276,17 +291,17 @@ where
     StopSign(StopSign, bool),
 }
 
-impl<T: PartialEq + Entry> PartialEq for LogEntry<T>
+impl<T: PartialEq + Entry> PartialEq for EntryRead<T>
 where
     <T as Entry>::Snapshot: PartialEq,
 {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (LogEntry::Decided(v1), LogEntry::Decided(v2)) => v1 == v2,
-            (LogEntry::Undecided(v1), LogEntry::Undecided(v2)) => v1 == v2,
-            (LogEntry::Trimmed(idx1), LogEntry::Trimmed(idx2)) => idx1 == idx2,
-            (LogEntry::Snapshotted(s1), LogEntry::Snapshotted(s2)) => s1 == s2,
-            (LogEntry::StopSign(ss1, b1), LogEntry::StopSign(ss2, b2)) => ss1 == ss2 && b1 == b2,
+            (EntryRead::Decided(v1), EntryRead::Decided(v2)) => v1 == v2,
+            (EntryRead::Undecided(v1), EntryRead::Undecided(v2)) => v1 == v2,
+            (EntryRead::Trimmed(idx1), EntryRead::Trimmed(idx2)) => idx1 == idx2,
+            (EntryRead::Snapshotted(s1), EntryRead::Snapshotted(s2)) => s1 == s2,
+            (EntryRead::StopSign(ss1, b1), EntryRead::StopSign(ss2, b2)) => ss1 == ss2 && b1 == b2,
             _ => false,
         }
     }
@@ -421,41 +436,40 @@ pub struct FlexibleQuorum {
     pub write_quorum_size: usize,
 }
 
-/// The type of quorum used by the OmniPaxos cluster.
-#[derive(Copy, Clone, Debug)]
-pub(crate) enum Quorum {
-    /// Both the read quorum and the write quorums are a majority of nodes
-    Majority(usize),
-    /// The read and write quorum sizes are defined by a `FlexibleQuorum`
-    Flexible(FlexibleQuorum),
+/// The quorum used by the OmniPaxos cluster. The read and write quorum sizes can be configured
+/// for different latency vs fault tolerance tradeoffs.
+#[derive(Copy, Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct Quorum {
+    /// The number of nodes a leader needs to consult to get an up-to-date view of the log.
+    pub read_quorum_size: usize,
+    /// The number of acknowledgments a leader needs to commit an entry to the log
+    pub write_quorum_size: usize,
 }
 
 impl Quorum {
-    pub(crate) fn with(flexible_quorum_config: Option<FlexibleQuorum>, num_nodes: usize) -> Self {
+    pub(crate) fn with(flexible_quorum_config: Option<FlexibleQuorum>, cluster_size: usize) -> Self {
         match flexible_quorum_config {
+            None => Quorum {
+                read_quorum_size: cluster_size / 2 + 1,
+                write_quorum_size: cluster_size / 2 + 1,
+            },
             Some(FlexibleQuorum {
                 read_quorum_size,
                 write_quorum_size,
-            }) => Quorum::Flexible(FlexibleQuorum {
+            }) => Quorum {
                 read_quorum_size,
                 write_quorum_size,
-            }),
-            None => Quorum::Majority(num_nodes / 2 + 1),
+            },
         }
     }
 
     pub(crate) fn is_prepare_quorum(&self, num_nodes: usize) -> bool {
-        match self {
-            Quorum::Majority(majority) => num_nodes >= *majority,
-            Quorum::Flexible(flex_quorum) => num_nodes >= flex_quorum.read_quorum_size,
-        }
+        num_nodes >= self.read_quorum_size
     }
 
     pub(crate) fn is_accept_quorum(&self, num_nodes: usize) -> bool {
-        match self {
-            Quorum::Majority(majority) => num_nodes >= *majority,
-            Quorum::Flexible(flex_quorum) => num_nodes >= flex_quorum.write_quorum_size,
-        }
+        num_nodes >= self.write_quorum_size
     }
 }
 

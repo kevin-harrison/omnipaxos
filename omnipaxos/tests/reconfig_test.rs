@@ -3,7 +3,7 @@ pub mod utils;
 use crate::utils::STOPSIGN_ID;
 use kompact::prelude::{promise, Ask};
 use omnipaxos::{
-    util::{LogEntry, NodeId},
+    util::{EntryRead, NodeId},
     ClusterConfig,
 };
 use serial_test::serial;
@@ -54,7 +54,7 @@ fn reconfig_test() {
             .read_decided_suffix(0)
             .expect("Failed to read decided suffix");
         match decided.last().expect("Failed to read last decided entry") {
-            LogEntry::StopSign(ss, decided) => {
+            EntryRead::StopSign(ss, decided) => {
                 assert_eq!(ss.next_config, new_config);
                 assert_eq!(ss.metadata, metadata);
                 assert!(decided, "StopSign should be decided")

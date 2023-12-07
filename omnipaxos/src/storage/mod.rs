@@ -4,7 +4,7 @@ mod state_cache;
 use super::ballot_leader_election::Ballot;
 #[cfg(feature = "unicache")]
 use crate::unicache::*;
-use crate::ClusterConfig;
+use crate::{ClusterConfig, util::{NodeId, Quorum}};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 use std::{error::Error, fmt::Debug};
@@ -43,6 +43,20 @@ pub trait Entry: Clone + Debug {
     #[cfg(all(feature = "unicache", feature = "serde"))]
     /// The unicache type for caching popular/re-occurring fields of an entry.
     type UniCache: UniCache<T = Self> + Serialize + for<'a> Deserialize<'a>;
+}
+
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub enum LogEntry<T: Entry> {
+    Entry(T),
+    NewQuorumConfig(QuorumConfig),
+} 
+
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub enum QuorumConfig {
+    Transitional(Quorum, Quorum),
+    Stable(Quorum)
 }
 
 /// A StopSign entry that marks the end of a configuration. Used for reconfiguration.
@@ -101,11 +115,11 @@ pub type StorageResult<T> = Result<T, Box<dyn Error>>;
 #[derive(Debug)]
 pub enum StorageOp<T: Entry> {
     /// Appends an entry to the end of the log.
-    AppendEntry(T),
+    AppendEntry(LogEntry<T>),
     /// Appends entries to the end of the log.
-    AppendEntries(Vec<T>),
+    AppendEntries(Vec<LogEntry<T>>),
     /// Appends entries to the log from the prefix specified by the given index.
-    AppendOnPrefix(usize, Vec<T>),
+    AppendOnPrefix(usize, Vec<LogEntry<T>>),
     /// Sets the round that has been promised.
     SetPromise(Ballot),
     /// Sets the decided index in the log.
@@ -135,13 +149,13 @@ where
     fn write_atomically(&mut self, ops: Vec<StorageOp<T>>) -> StorageResult<()>;
 
     /// Appends an entry to the end of the log.
-    fn append_entry(&mut self, entry: T) -> StorageResult<()>;
+    fn append_entry(&mut self, entry: LogEntry<T>) -> StorageResult<()>;
 
     /// Appends the entries of `entries` to the end of the log.
-    fn append_entries(&mut self, entries: Vec<T>) -> StorageResult<()>;
+    fn append_entries(&mut self, entries: Vec<LogEntry<T>>) -> StorageResult<()>;
 
     /// Appends the entries of `entries` to the prefix from index `from_index` (inclusive) in the log.
-    fn append_on_prefix(&mut self, from_idx: usize, entries: Vec<T>) -> StorageResult<()>;
+    fn append_on_prefix(&mut self, from_idx: usize, entries: Vec<LogEntry<T>>) -> StorageResult<()>;
 
     /// Sets the round that has been promised.
     fn set_promise(&mut self, n_prom: Ballot) -> StorageResult<()>;
@@ -161,18 +175,24 @@ where
 
     /// Returns the entries in the log in the index interval of [from, to).
     /// If entries **do not exist for the complete interval**, an empty Vector should be returned.
-    fn get_entries(&self, from: usize, to: usize) -> StorageResult<Vec<T>>;
+    fn get_entries(&self, from: usize, to: usize) -> StorageResult<Vec<LogEntry<T>>>;
 
     /// Returns the current length of the log.
     fn get_log_len(&self) -> StorageResult<usize>;
 
     /// Returns the suffix of entries in the log from index `from` (inclusive).
     /// If entries **do not exist for the complete interval**, an empty Vector should be returned.
-    fn get_suffix(&self, from: usize) -> StorageResult<Vec<T>>;
+    fn get_suffix(&self, from: usize) -> StorageResult<Vec<LogEntry<T>>>;
 
     /// Returns the round that has been promised.
     fn get_promise(&self) -> StorageResult<Option<Ballot>>;
 
+    /// Sets the current quorum configuration of the cluster and the index of its cooresponding entry.
+    fn set_quorum_config(&mut self, s: (QuorumConfig, usize)) -> StorageResult<()>;
+
+    /// Returns the stored QuorumConfig, returns `None` if no QuorumConfig has been stored.
+    fn get_quorum_config(&self) -> StorageResult<Option<(QuorumConfig, usize)>>;
+    
     /// Sets the StopSign used for reconfiguration.
     fn set_stopsign(&mut self, s: Option<StopSign>) -> StorageResult<()>;
 

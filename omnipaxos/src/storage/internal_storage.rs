@@ -1,8 +1,8 @@
-use super::state_cache::StateCache;
+use super::{state_cache::StateCache, LogEntry, QuorumConfig};
 use crate::{
     ballot_leader_election::Ballot,
     storage::{Entry, Snapshot, SnapshotType, StopSign, Storage, StorageOp, StorageResult},
-    util::{AcceptedMetaData, IndexEntry, LogEntry, LogSync, SnapshottedEntry},
+    util::{AcceptedMetaData, IndexEntry, EntryRead, LogSync, SnapshottedEntry},
     CompactionErr,
 };
 #[cfg(feature = "unicache")]
@@ -15,6 +15,8 @@ use std::{
 
 pub(crate) struct InternalStorageConfig {
     pub(crate) batch_size: usize,
+    pub(crate) quorum_config: QuorumConfig,
+    pub(crate) quorum_config_idx: usize,
 }
 
 /// Internal representation of storage. Serves as the interface between Sequence Paxos and the
@@ -65,6 +67,7 @@ where
             .unwrap()
             .unwrap_or_default();
         self.state_cache.compacted_idx = self.storage.get_compacted_idx().unwrap();
+        self.state_cache.quorum_config = self.storage.get_quorum_config().unwrap();
         self.state_cache.stopsign = self.storage.get_stopsign().unwrap();
         self.state_cache.accepted_idx =
             self.storage.get_log_len().unwrap() + self.state_cache.compacted_idx;
@@ -77,7 +80,7 @@ where
     pub(crate) fn read_decided_suffix(
         &self,
         from_idx: usize,
-    ) -> StorageResult<Option<Vec<LogEntry<T>>>> {
+    ) -> StorageResult<Option<Vec<EntryRead<T>>>> {
         let decided_idx = self.get_decided_idx();
         if from_idx < decided_idx {
             self.read(from_idx..decided_idx)
@@ -87,7 +90,7 @@ where
     }
 
     /// Read entries in the range `r` in the log. Returns `None` if `r` is out of bounds.
-    pub(crate) fn read<R>(&self, r: R) -> StorageResult<Option<Vec<LogEntry<T>>>>
+    pub(crate) fn read<R>(&self, r: R) -> StorageResult<Option<Vec<EntryRead<T>>>>
     where
         R: RangeBounds<usize>,
     {
@@ -124,7 +127,7 @@ where
             }
             (IndexEntry::Entry, IndexEntry::StopSign(ss)) => {
                 let mut entries = self.create_read_log_entries(from_idx, to_idx - 1)?;
-                entries.push(LogEntry::StopSign(ss, self.stopsign_is_decided()));
+                entries.push(EntryRead::StopSign(ss, self.stopsign_is_decided()));
                 Ok(Some(entries))
             }
             (IndexEntry::Compacted, IndexEntry::Entry) => {
@@ -141,11 +144,11 @@ where
                 entries.push(compacted);
                 let mut e = self.create_read_log_entries(compacted_idx, to_idx - 1)?;
                 entries.append(&mut e);
-                entries.push(LogEntry::StopSign(ss, self.stopsign_is_decided()));
+                entries.push(EntryRead::StopSign(ss, self.stopsign_is_decided()));
                 Ok(Some(entries))
             }
             (IndexEntry::StopSign(ss), IndexEntry::StopSign(_)) => {
-                Ok(Some(vec![LogEntry::StopSign(
+                Ok(Some(vec![EntryRead::StopSign(
                     ss,
                     self.stopsign_is_decided(),
                 )]))
@@ -176,7 +179,7 @@ where
         }
     }
 
-    fn create_read_log_entries(&self, from: usize, to: usize) -> StorageResult<Vec<LogEntry<T>>> {
+    fn create_read_log_entries(&self, from: usize, to: usize) -> StorageResult<Vec<EntryRead<T>>> {
         let decided_idx = self.get_decided_idx();
         let entries = self
             .get_entries(from, to)?
@@ -185,19 +188,25 @@ where
             .map(|(idx, e)| {
                 let log_idx = idx + from;
                 if log_idx < decided_idx {
-                    LogEntry::Decided(e)
+                    match e {
+                        LogEntry::Entry(e) => EntryRead::Decided(e),
+                        LogEntry::NewQuorumConfig(qc) => EntryRead::DecidedQuorumConfig(qc),
+                    }
                 } else {
-                    LogEntry::Undecided(e)
+                    match e {
+                        LogEntry::Entry(e) => EntryRead::Undecided(e),
+                        LogEntry::NewQuorumConfig(qc) => EntryRead::UndecidedQuorumConfig(qc),
+                    }
                 }
             })
             .collect();
         Ok(entries)
     }
 
-    fn create_compacted_entry(&self, compacted_idx: usize) -> StorageResult<LogEntry<T>> {
+    fn create_compacted_entry(&self, compacted_idx: usize) -> StorageResult<EntryRead<T>> {
         self.storage.get_snapshot().map(|snap| match snap {
-            Some(s) => LogEntry::Snapshotted(SnapshottedEntry::with(compacted_idx, s)),
-            None => LogEntry::Trimmed(compacted_idx),
+            Some(s) => EntryRead::Snapshotted(SnapshottedEntry::with(compacted_idx, s)),
+            None => EntryRead::Trimmed(compacted_idx),
         })
     }
 
@@ -221,8 +230,24 @@ where
         self.flush_if_full_batch(append_res)
     }
 
+    // Flushes batched entries and appends a quorum config to the log. Returns the AcceptedMetaData
+    // associated with the flushed entries (not including the quorum config entry) if there were any.
+    pub(crate) fn flush_and_append_quorum_config(
+        &mut self,
+        quorum_config: QuorumConfig,
+    ) -> StorageResult<Option<AcceptedMetaData<T>>> {
+        let accepted_metadata = if self.state_cache.batched_entries.is_empty() {
+            Ok(None)
+        } else {
+            let batched_entries = self.state_cache.take_batched_entries();
+            self.flush_if_full_batch(Some(batched_entries))
+        };
+        self.append_quorum_config(quorum_config)?;
+        accepted_metadata
+    }
+
     // Flushes batched entries and appends a stopsign to the log. Returns the AcceptedMetaData
-    // associated with any flushed entries if there were any.
+    // associated with the flushed entries if there were any.
     pub(crate) fn append_stopsign(
         &mut self,
         ss: StopSign,
@@ -305,7 +330,16 @@ where
         entries: Vec<T>,
     ) -> StorageResult<usize> {
         let num_new_entries = entries.len();
-        self.storage.append_entries(entries)?;
+        // TODO: If we work with LogEntries immediately in SequencePaxos
+        // (and messages), we can batch LogEntries and check know here exactly when a reconfig gets
+        // accepted (still have to iter thru entries). Both leaders and followers need to update
+        // thier quorum (followers so that their BLE gets informed). This means:
+        // - Pass LogEntry<T> internal_storage.append functions
+        // - AcceptDecide entries are LogEntry<T> (Need this in AccSync suffixes anyways)
+        // - Quorum state is updated in internal_storage and SeqPaxos calls a getter when it needs
+        // it. All state updates due to accepting a reconfig should happen here (else we need to
+        // handle accepted_idx AND flushed reconfig when SeqPaxos flushes).
+        self.storage.append_entries(entries.into_iter().map(|e| LogEntry::Entry(e)).collect())?;
         self.state_cache.accepted_idx += num_new_entries;
         Ok(self.state_cache.accepted_idx)
     }
@@ -477,7 +511,7 @@ where
         self.state_cache.accepted_round
     }
 
-    pub(crate) fn get_entries(&self, from: usize, to: usize) -> StorageResult<Vec<T>> {
+    pub(crate) fn get_entries(&self, from: usize, to: usize) -> StorageResult<Vec<LogEntry<T>>> {
         self.storage.get_entries(from, to)
     }
 
@@ -486,7 +520,7 @@ where
         self.state_cache.accepted_idx
     }
 
-    pub(crate) fn get_suffix(&self, from: usize) -> StorageResult<Vec<T>> {
+    pub(crate) fn get_suffix(&self, from: usize) -> StorageResult<Vec<LogEntry<T>>> {
         self.storage.get_suffix(from)
     }
 
@@ -512,6 +546,29 @@ where
     // Returns whether a stopsign is decided
     pub(crate) fn stopsign_is_decided(&self) -> bool {
         self.state_cache.stopsign_is_decided()
+    }
+
+    pub(crate) fn append_quorum_config(&mut self, config: QuorumConfig) -> StorageResult<usize> {
+        self.storage.append_entry(LogEntry::NewQuorumConfig(config))?;
+        self.state_cache.accepted_idx += 1;
+        self.set_quorum_config(config, self.state_cache.accepted_idx)?;
+        Ok(self.state_cache.accepted_idx)
+    }
+
+    pub(crate) fn set_quorum_config(&mut self, config: QuorumConfig, idx: usize) -> StorageResult<()> {
+        self.storage.set_quorum_config((config, idx))?;
+        self.state_cache.quorum_config = config;
+        self.state_cache.quorum_config_idx = idx;
+        Ok(())
+    }
+
+    // TODO: this might need to be clones or be a reference
+    pub(crate) fn get_quorum_config(&self) -> QuorumConfig {
+        self.state_cache.quorum_config
+    }
+
+    pub(crate) fn get_quorum_config_idx(&self) -> usize {
+        self.state_cache.quorum_config_idx
     }
 
     pub(crate) fn get_snapshot(&self) -> StorageResult<Option<T::Snapshot>> {

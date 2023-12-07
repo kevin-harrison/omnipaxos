@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 pub mod sequence_paxos {
     use crate::{
         ballot_leader_election::Ballot,
-        storage::{Entry, StopSign},
-        util::{LogSync, NodeId, SequenceNumber},
+        storage::{Entry, StopSign, LogEntry, QuorumConfig},
+        util::{LogSync, NodeId, SequenceNumber}, ClusterConfig,
     };
     #[cfg(feature = "serde")]
     use serde::{Deserialize, Serialize};
@@ -123,6 +123,18 @@ pub mod sequence_paxos {
         pub decided_idx: usize,
     }
 
+    /// Message sent by leader to followers to accept a new quorum config.
+    #[derive(Clone, Debug)]
+    #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+    pub struct AcceptQuorumConfig {
+        /// The current round.
+        pub n: Ballot,
+        /// The sequence number of this message in the leader-to-follower accept sequence
+        pub seq_num: SequenceNumber,
+        /// The quorum config.
+        pub quorum_config: QuorumConfig,
+    }
+
     /// Message sent by leader to followers to accept a StopSign
     #[derive(Clone, Debug)]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -131,7 +143,7 @@ pub mod sequence_paxos {
         pub n: Ballot,
         /// The sequence number of this message in the leader-to-follower accept sequence
         pub seq_num: SequenceNumber,
-        /// The decided index.
+        /// The stop sign.
         pub ss: StopSign,
     }
 
@@ -174,6 +186,8 @@ pub mod sequence_paxos {
         /// Forward client proposals to the leader.
         ProposalForward(Vec<T>),
         Compaction(Compaction),
+        AcceptQuorumConfig(AcceptQuorumConfig),
+        ForwardReconfig(ClusterConfig),
         AcceptStopSign(AcceptStopSign),
         ForwardStopSign(StopSign),
     }

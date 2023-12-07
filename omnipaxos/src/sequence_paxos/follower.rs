@@ -107,6 +107,23 @@ where
             }
         }
     }
+    
+    pub(crate) fn handle_accept_quorum_config(&mut self, acc_qc: AcceptQuorumConfig) {
+        if self.check_valid_ballot(acc_qc.n)
+            && self.state == (Role::Follower, Phase::Accept)
+            && self.handle_sequence_num(acc_qc.seq_num, acc_qc.n.pid) == MessageStatus::Expected
+        {
+            // Flush entries before appending the quorum config. The accepted index is ignored here as
+            // it will be updated when appending the quorum config.
+            let _ = self.internal_storage.flush_batch().expect(WRITE_ERROR_MSG);
+            let new_accepted_idx = self
+                .internal_storage
+                .append_quorum_config(acc_qc.quorum_config)
+                .expect(WRITE_ERROR_MSG);
+            // TODO: Need to update quorum here because BLE needs to know to function correctly
+            self.reply_accepted(acc_qc.n, new_accepted_idx);
+        }
+    }
 
     pub(crate) fn handle_accept_stopsign(&mut self, acc_ss: AcceptStopSign) {
         if self.check_valid_ballot(acc_ss.n)

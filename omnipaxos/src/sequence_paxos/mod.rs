@@ -4,7 +4,7 @@ use crate::utils::logger::create_logger;
 use crate::{
     storage::{
         internal_storage::{InternalStorage, InternalStorageConfig},
-        Entry, Snapshot, StopSign, Storage,
+        Entry, Snapshot, StopSign, Storage, LogEntry, QuorumConfig,
     },
     util::{
         FlexibleQuorum, LogSync, NodeId, Quorum, SequenceNumber, READ_ERROR_MSG, WRITE_ERROR_MSG,
@@ -31,6 +31,7 @@ where
     peers: Vec<NodeId>, // excluding self pid
     state: (Role, Phase),
     buffered_proposals: Vec<T>,
+    buffered_quorum_config: Option<QuorumConfig>,
     buffered_stopsign: Option<StopSign>,
     outgoing: Vec<PaxosMessage<T>>,
     leader_state: LeaderState<T>,
@@ -54,7 +55,6 @@ where
         let pid = config.pid;
         let peers = config.peers;
         let num_nodes = &peers.len() + 1;
-        let quorum = Quorum::with(config.flexible_quorum, num_nodes);
         let max_peer_pid = peers.iter().max().unwrap();
         let max_pid = *std::cmp::max(max_peer_pid, &pid) as usize;
         let mut outgoing = Vec::with_capacity(config.buffer_size);
@@ -77,8 +77,18 @@ where
             }
             None => ((Role::Follower, Phase::None), Ballot::default()),
         };
+        let saved_quorum_config = storage.get_quorum_config().expect(WRITE_ERROR_MSG);
+        let (quorum_config, quorum_config_idx) = match saved_quorum_config {
+            Some((saved_quorum_config, idx)) => (saved_quorum_config, idx),
+            None => {
+                let initial_quorum = Quorum::with(config.flexible_quorum, num_nodes);
+                (QuorumConfig::Stable(initial_quorum), 0)
+            },
+        };
         let internal_storage_config = InternalStorageConfig {
             batch_size: config.batch_size,
+            quorum_config,
+            quorum_config_idx,
         };
         let mut paxos = SequencePaxos {
             internal_storage: InternalStorage::with(
@@ -91,9 +101,10 @@ where
             peers,
             state,
             buffered_proposals: vec![],
+            buffered_quorum_config: None,
             buffered_stopsign: None,
             outgoing,
-            leader_state: LeaderState::<T>::with(leader, max_pid, quorum),
+            leader_state: LeaderState::<T>::with(leader, max_pid, quorum_config),
             latest_accepted_meta: None,
             current_seq_num: SequenceNumber::default(),
             cached_promise_message: None,
@@ -117,12 +128,10 @@ where
         #[cfg(feature = "logging")]
         {
             info!(paxos.logger, "Paxos component pid: {} created!", pid);
-            if let Quorum::Flexible(flex_quorum) = quorum {
-                if flex_quorum.read_quorum_size > num_nodes - flex_quorum.write_quorum_size + 1 {
-                    warn!(
-                        paxos.logger,
-                        "Unnecessary overlaps in read and write quorums. Read and Write quorums only need to be overlapping by one node i.e., read_quorum_size + write_quorum_size = num_nodes + 1");
-                }
+            if quorum.read_quorum_size > num_nodes - quorum.write_quorum_size + 1 {
+                warn!(
+                    paxos.logger,
+                    "Unnecessary overlaps in read and write quorums. Read and Write quorums only need to be overlapping by one node i.e., read_quorum_size + write_quorum_size = num_nodes + 1");
             }
         }
         paxos
@@ -272,13 +281,15 @@ where
             PaxosMsg::Decide(d) => self.handle_decide(d),
             PaxosMsg::ProposalForward(proposals) => self.handle_forwarded_proposal(proposals),
             PaxosMsg::Compaction(c) => self.handle_compaction(c),
+            PaxosMsg::AcceptQuorumConfig(acc_qc) => self.handle_accept_quorum_config(acc_qc),
+            PaxosMsg::ForwardReconfig(f_reconfig) => self.handle_forwarded_reconfig(f_reconfig),
             PaxosMsg::AcceptStopSign(acc_ss) => self.handle_accept_stopsign(acc_ss),
             PaxosMsg::ForwardStopSign(f_ss) => self.handle_forwarded_stopsign(f_ss),
         }
     }
 
-    /// Returns whether this Sequence Paxos has been reconfigured
-    pub(crate) fn is_reconfigured(&self) -> Option<StopSign> {
+    /// Returns whether this Sequence Paxos has been reconfigured with a stopsign
+    pub(crate) fn is_stopped(&self) -> Option<StopSign> {
         match self.internal_storage.get_stopsign() {
             Some(ss) if self.internal_storage.stopsign_is_decided() => Some(ss),
             _ => None,
@@ -286,13 +297,17 @@ where
     }
 
     /// Returns whether this Sequence Paxos instance is stopped, i.e. if it has been reconfigured.
-    fn accepted_reconfiguration(&self) -> bool {
+    fn pending_stopsign(&self) -> bool {
         self.internal_storage.get_stopsign().is_some()
+    }
+
+    fn pending_quorum_reconfig(&self) -> bool {
+        self.internal_storage.get_quorum_config_idx() > self.internal_storage.get_decided_idx()
     }
 
     /// Append an entry to the replicated log.
     pub(crate) fn append(&mut self, entry: T) -> Result<(), ProposeErr<T>> {
-        if self.accepted_reconfiguration() {
+        if self.pending_stopsign() {
             Err(ProposeErr::PendingReconfigEntry(entry))
         } else {
             self.propose_entry(entry);
@@ -308,7 +323,7 @@ where
         new_config: ClusterConfig,
         metadata: Option<Vec<u8>>,
     ) -> Result<(), ProposeErr<T>> {
-        if self.accepted_reconfiguration() {
+        if self.pending_stopsign() {
             return Err(ProposeErr::PendingReconfigConfig(new_config, metadata));
         }
         #[cfg(feature = "logging")]
@@ -321,6 +336,44 @@ where
             (Role::Leader, Phase::Prepare) => self.buffered_stopsign = Some(ss),
             (Role::Leader, Phase::Accept) => self.accept_stopsign_leader(ss),
             _ => self.forward_stopsign(ss),
+        }
+        Ok(())
+    }
+
+    pub(crate) fn reconfigure_joint_consensus(&mut self, new_config: ClusterConfig) -> Result<(), ProposeErr<T>> {
+        // TODO: support arbitrary reconfigurations
+        let new_config_has_current_nodes = new_config.nodes.contains(&self.pid) &&
+            self.peers.iter().all(|pid| new_config.nodes.contains(pid));
+        let new_config_has_no_extra_nodes = new_config.nodes.len() == self.peers.len() + 1;
+        if !(new_config_has_current_nodes && new_config_has_no_extra_nodes) {
+            unimplemented!("Haven't implemented joint consensus when changing nodes yet");
+        }
+        if self.pending_stopsign() || self.pending_quorum_reconfig() {
+            return Err(ProposeErr::PendingReconfigConfig(new_config, None));
+        }
+        match self.state.0 {
+            Role::Leader => {
+                let cluster_size = self.peers.len() + 1;
+                let new_quorum = Quorum::with(new_config.flexible_quorum, cluster_size);
+                let new_quorum_has_overlap_property = self.leader_state.quorum.is_prepare_quorum(new_quorum.write_quorum_size);
+                let next_quorum = if new_quorum_has_overlap_property {
+                    QuorumConfig::Stable(new_quorum)
+                } else {
+                    let transitional_flex_quorum = Some(FlexibleQuorum {
+                        read_quorum_size: cluster_size - new_quorum.write_quorum_size + 1, 
+                        write_quorum_size: cluster_size - self.leader_state.quorum.read_quorum_size + 1,
+                    });
+                    let transition_quorum = Quorum::with(transitional_flex_quorum, cluster_size);
+                    QuorumConfig::Transitional(transition_quorum, new_quorum)
+                };
+                match self.state.1 {
+                    Phase::Accept => self.accept_quorum_config_leader(next_quorum),
+                    // TODO: make sure we cant have a pending config and buffered config
+                    Phase::Prepare => self.buffered_quorum_config = Some(next_quorum),
+                    _ => self.forward_reconfig(new_config)
+                }
+            },
+            Role::Follower => self.forward_reconfig(new_config),
         }
         Ok(())
     }
@@ -390,6 +443,22 @@ where
             self.buffered_stopsign = Some(ss);
         }
     }
+
+    pub(crate) fn forward_reconfig(&mut self, new_config: ClusterConfig) {
+        let leader = self.get_current_leader();
+        if leader > 0 && self.pid != leader {
+            #[cfg(feature = "logging")]
+            trace!(self.logger, "Forwarding reconfig to Leader {:?}", leader);
+            let forward_reconfig = PaxosMsg::ForwardReconfig(new_config);
+            let msg = PaxosMessage {
+                from: self.pid,
+                to: leader,
+                msg: forward_reconfig,
+            };
+            self.outgoing.push(msg);
+        }
+    }
+
     /// Returns `LogSync`, a struct to help other servers synchronize their log to correspond to the
     /// current state of our own log. The `common_prefix_idx` marks where in the log the other server
     /// needs to be sync from.

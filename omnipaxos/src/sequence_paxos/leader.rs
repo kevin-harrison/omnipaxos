@@ -21,7 +21,7 @@ where
         debug!(self.logger, "Newly elected leader: {:?}", n);
         if self.pid == n.pid {
             self.leader_state =
-                LeaderState::with(n, self.leader_state.max_pid, self.leader_state.quorum);
+                LeaderState::with(n, self.leader_state.max_pid, self.internal_storage.get_quorum_config());
             // Flush any pending writes
             // Don't have to handle flushed entries here because we will sync with followers
             let _ = self.internal_storage.flush_batch().expect(WRITE_ERROR_MSG);
@@ -74,7 +74,7 @@ where
     }
 
     pub(crate) fn handle_forwarded_proposal(&mut self, mut entries: Vec<T>) {
-        if !self.accepted_reconfiguration() {
+        if !self.pending_stopsign() {
             match self.state {
                 (Role::Leader, Phase::Prepare) => self.buffered_proposals.append(&mut entries),
                 (Role::Leader, Phase::Accept) => self.accept_entries_leader(entries),
@@ -83,8 +83,12 @@ where
         }
     }
 
+    pub(crate) fn handle_forwarded_reconfig(&mut self, reconfig: ClusterConfig) {
+        self.reconfigure_joint_consensus(reconfig);
+    }
+
     pub(crate) fn handle_forwarded_stopsign(&mut self, ss: StopSign) {
-        if self.accepted_reconfiguration() {
+        if self.pending_stopsign() {
             return;
         }
         match self.state {
@@ -130,6 +134,20 @@ where
                 .set_accepted_idx(self.pid, metadata.accepted_idx);
             self.send_acceptdecide(metadata);
         }
+    }
+
+    pub(crate) fn accept_quorum_config_leader(&mut self, quorum_config: QuorumConfig) {
+        let accepted_metadata = self
+            .internal_storage
+            .flush_and_append_quorum_config(quorum_config.clone())
+            .expect(WRITE_ERROR_MSG);
+        let accepted_idx = self.internal_storage.get_accepted_idx();
+        self.leader_state.set_accepted_idx(self.pid, accepted_idx);
+        self.leader_state.update_quorum(quorum_config);
+        if let Some(metadata) = accepted_metadata {
+            self.send_acceptdecide(metadata);
+        }
+        self.send_accept_quorum_config(quorum_config.clone());
     }
 
     pub(crate) fn accept_stopsign_leader(&mut self, ss: StopSign) {
@@ -229,6 +247,24 @@ where
         }
     }
 
+    fn send_accept_quorum_config(&mut self, quorum_config: QuorumConfig) {
+        for pid in self.leader_state.get_promised_followers() {
+            // Reset message batching since quorum config isn't batched with entries but must still
+            // retain its order among the entries.
+            self.leader_state.set_batch_accept_meta(pid, None);
+            let acc_qc = PaxosMsg::AcceptQuorumConfig(AcceptQuorumConfig {
+                seq_num: self.leader_state.next_seq_num(pid),
+                n: self.leader_state.n_leader,
+                quorum_config,
+            });
+            self.outgoing.push(PaxosMessage {
+                from: self.pid,
+                to: pid,
+                msg: acc_qc,
+            });
+        }
+    }
+
     fn send_accept_stopsign(&mut self, to: NodeId, ss: StopSign, resend: bool) {
         let seq_num = match resend {
             true => self.leader_state.get_seq_num(to),
@@ -270,7 +306,7 @@ where
             .internal_storage
             .sync_log(self.leader_state.n_leader, decided_idx, max_promise_sync)
             .expect(WRITE_ERROR_MSG);
-        if !self.accepted_reconfiguration() {
+        if !self.pending_stopsign() {
             if !self.buffered_proposals.is_empty() {
                 let entries = std::mem::take(&mut self.buffered_proposals);
                 new_accepted_idx = self
@@ -335,24 +371,35 @@ where
         if accepted.n == self.leader_state.n_leader && self.state == (Role::Leader, Phase::Accept) {
             self.leader_state
                 .set_accepted_idx(from, accepted.accepted_idx);
-            if accepted.accepted_idx > self.internal_storage.get_decided_idx()
+            let decided_idx = self.internal_storage.get_decided_idx();
+            if accepted.accepted_idx > decided_idx
                 && self.leader_state.is_chosen(accepted.accepted_idx)
             {
-                let decided_idx = accepted.accepted_idx;
+                let new_decided_idx = accepted.accepted_idx;
                 self.internal_storage
-                    .set_decided_idx(decided_idx)
+                    .set_decided_idx(new_decided_idx)
                     .expect(WRITE_ERROR_MSG);
                 for pid in self.leader_state.get_promised_followers() {
                     match self.leader_state.get_batch_accept_meta(pid) {
                         Some((bal, msg_idx)) if bal == self.leader_state.n_leader => {
                             let PaxosMessage { msg, .. } = self.outgoing.get_mut(msg_idx).unwrap();
                             match msg {
-                                PaxosMsg::AcceptDecide(acc) => acc.decided_idx = decided_idx,
+                                PaxosMsg::AcceptDecide(acc) => acc.decided_idx = new_decided_idx,
                                 _ => panic!("Cached index is not an AcceptDecide!"),
                             }
                         }
-                        _ => self.send_decide(pid, decided_idx, false),
+                        _ => self.send_decide(pid, new_decided_idx, false),
                     };
+                }
+                // TODO: Do we need to do a similar check for the syncing actions? Can
+                // handle_majority_promises decide an entry that wasn't decided in the max log?
+                let current_quorum_config = self.internal_storage.get_quorum_config();
+                if let QuorumConfig::Transitional(_, qc) = current_quorum_config {
+                    let config_idx = self.internal_storage.get_quorum_config_idx();
+                    let config_became_decided = config_idx > decided_idx && config_idx <= new_decided_idx;
+                    if  config_became_decided {
+                        self.accept_quorum_config_leader(QuorumConfig::Stable(qc));
+                    }
                 }
             }
         }
