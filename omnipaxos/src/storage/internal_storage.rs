@@ -2,7 +2,7 @@ use super::{state_cache::StateCache, LogEntry, QuorumConfig};
 use crate::{
     ballot_leader_election::Ballot,
     storage::{Entry, Snapshot, SnapshotType, StopSign, Storage, StorageOp, StorageResult},
-    util::{AcceptedMetaData, IndexEntry, EntryRead, LogSync, SnapshottedEntry},
+    util::{AcceptedMetaData, EntryRead, IndexEntry, LogSync, Quorum, SnapshottedEntry},
     CompactionErr,
 };
 #[cfg(feature = "unicache")]
@@ -67,7 +67,6 @@ where
             .unwrap()
             .unwrap_or_default();
         self.state_cache.compacted_idx = self.storage.get_compacted_idx().unwrap();
-        self.state_cache.quorum_config = self.storage.get_quorum_config().unwrap();
         self.state_cache.stopsign = self.storage.get_stopsign().unwrap();
         self.state_cache.accepted_idx =
             self.storage.get_log_len().unwrap() + self.state_cache.compacted_idx;
@@ -330,16 +329,8 @@ where
         entries: Vec<T>,
     ) -> StorageResult<usize> {
         let num_new_entries = entries.len();
-        // TODO: If we work with LogEntries immediately in SequencePaxos
-        // (and messages), we can batch LogEntries and check know here exactly when a reconfig gets
-        // accepted (still have to iter thru entries). Both leaders and followers need to update
-        // thier quorum (followers so that their BLE gets informed). This means:
-        // - Pass LogEntry<T> internal_storage.append functions
-        // - AcceptDecide entries are LogEntry<T> (Need this in AccSync suffixes anyways)
-        // - Quorum state is updated in internal_storage and SeqPaxos calls a getter when it needs
-        // it. All state updates due to accepting a reconfig should happen here (else we need to
-        // handle accepted_idx AND flushed reconfig when SeqPaxos flushes).
-        self.storage.append_entries(entries.into_iter().map(|e| LogEntry::Entry(e)).collect())?;
+        self.storage
+            .append_entries(entries.into_iter().map(|e| LogEntry::Entry(e)).collect())?;
         self.state_cache.accepted_idx += num_new_entries;
         Ok(self.state_cache.accepted_idx)
     }
@@ -376,6 +367,31 @@ where
             }
             self.state_cache.accepted_idx = sync.sync_idx + sync.suffix.len();
             sync_txn.push(StorageOp::AppendOnPrefix(sync.sync_idx, sync.suffix));
+            match sync.quorum_config {
+                QuorumConfig::Transitional(_, qc) if sync.quorum_config_idx <= decided_idx => {
+                    let next_config = QuorumConfig::Stable(qc);
+                    sync_txn.push(StorageOp::AppendEntry(LogEntry::NewQuorumConfig(
+                        next_config,
+                    )));
+                    self.state_cache.accepted_idx += 1;
+                    sync_txn.push(StorageOp::SetQuorumConfig(
+                        next_config,
+                        self.state_cache.accepted_idx,
+                    ));
+                    self.state_cache.quorum_config = next_config;
+                    self.state_cache.quorum_config_idx = self.state_cache.accepted_idx;
+                    self.state_cache.quorum = next_config.get_active_quorum();
+                }
+                _ => {
+                    sync_txn.push(StorageOp::SetQuorumConfig(
+                        sync.quorum_config,
+                        sync.quorum_config_idx,
+                    ));
+                    self.state_cache.quorum_config = sync.quorum_config;
+                    self.state_cache.quorum_config_idx = sync.quorum_config_idx;
+                    self.state_cache.quorum = sync.quorum_config.get_active_quorum();
+                }
+            }
             match sync.stopsign {
                 Some(ss) => {
                     self.state_cache.stopsign = Some(ss.clone());
@@ -405,7 +421,13 @@ where
         }
         let entries = self
             .storage
-            .get_entries(current_compacted_idx, compact_idx)?;
+            .get_entries(current_compacted_idx, compact_idx)?
+            .into_iter()
+            .filter_map(|log_entry| match log_entry {
+                LogEntry::Entry(e) => Some(e),
+                LogEntry::NewQuorumConfig(_) => None,
+            })
+            .collect::<Vec<T>>();
         let delta = T::Snapshot::create(entries.as_slice());
         match self.storage.get_snapshot()? {
             Some(mut s) => {
@@ -437,7 +459,14 @@ where
                 self.get_snapshot()?.map(|s| SnapshotType::Complete(s))
             }
         } else {
-            let diff_entries = self.get_entries(from_idx, log_decided_idx)?;
+            let diff_entries = self
+                .get_entries(from_idx, log_decided_idx)?
+                .into_iter()
+                .filter_map(|log_entry| match log_entry {
+                    LogEntry::Entry(e) => Some(e),
+                    LogEntry::NewQuorumConfig(_) => None,
+                })
+                .collect::<Vec<T>>();
             Some(SnapshotType::Delta(T::Snapshot::create(
                 diff_entries.as_slice(),
             )))
@@ -549,26 +578,39 @@ where
     }
 
     pub(crate) fn append_quorum_config(&mut self, config: QuorumConfig) -> StorageResult<usize> {
-        self.storage.append_entry(LogEntry::NewQuorumConfig(config))?;
+        self.storage
+            .append_entry(LogEntry::NewQuorumConfig(config))?;
         self.state_cache.accepted_idx += 1;
         self.set_quorum_config(config, self.state_cache.accepted_idx)?;
         Ok(self.state_cache.accepted_idx)
     }
 
-    pub(crate) fn set_quorum_config(&mut self, config: QuorumConfig, idx: usize) -> StorageResult<()> {
-        self.storage.set_quorum_config((config, idx))?;
+    pub(crate) fn set_quorum_config(
+        &mut self,
+        config: QuorumConfig,
+        idx: usize,
+    ) -> StorageResult<()> {
+        self.storage.set_quorum_config(config, idx)?;
         self.state_cache.quorum_config = config;
         self.state_cache.quorum_config_idx = idx;
+        self.state_cache.quorum = config.get_active_quorum();
         Ok(())
     }
 
-    // TODO: this might need to be clones or be a reference
     pub(crate) fn get_quorum_config(&self) -> QuorumConfig {
         self.state_cache.quorum_config
     }
 
     pub(crate) fn get_quorum_config_idx(&self) -> usize {
         self.state_cache.quorum_config_idx
+    }
+
+    pub(crate) fn set_quorum(&mut self, quorum: Quorum) {
+        self.state_cache.quorum = quorum;
+    }
+
+    pub(crate) fn get_quorum(&self) -> Quorum {
+        self.state_cache.quorum
     }
 
     pub(crate) fn get_snapshot(&self) -> StorageResult<Option<T::Snapshot>> {

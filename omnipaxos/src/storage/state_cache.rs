@@ -1,5 +1,5 @@
-use super::{internal_storage::InternalStorageConfig, Entry, StopSign, QuorumConfig, LogEntry};
-use crate::ballot_leader_election::Ballot;
+use super::{internal_storage::InternalStorageConfig, Entry, QuorumConfig, StopSign};
+use crate::{ballot_leader_election::Ballot, util::Quorum};
 #[cfg(feature = "unicache")]
 use crate::{unicache::*, util::NodeId};
 
@@ -25,10 +25,12 @@ where
     pub accepted_idx: usize,
     /// Garbage collected index.
     pub compacted_idx: usize,
-    /// The current quorum definition.
+    /// The current quorum configuration.
     pub quorum_config: QuorumConfig,
-    /// The log index of the current quorum definition.
+    /// The log index of the current quorum configuration's entry.
     pub quorum_config_idx: usize,
+    /// The current, active quorum.
+    pub quorum: Quorum,
     /// Stopsign entry.
     pub stopsign: Option<StopSign>,
     #[cfg(feature = "unicache")]
@@ -58,6 +60,7 @@ where
             compacted_idx: 0,
             quorum_config: config.quorum_config,
             quorum_config_idx: config.quorum_config_idx,
+            quorum: config.quorum_config.get_active_quorum(),
             stopsign: None,
             #[cfg(feature = "unicache")]
             batched_processed_by_leader: Vec::with_capacity(config.batch_size),

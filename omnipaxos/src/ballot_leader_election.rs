@@ -198,7 +198,9 @@ impl BallotLeaderElection {
         &mut self,
         seq_paxos_state: &(Role, Phase),
         seq_paxos_promise: Ballot,
+        seq_paxos_quorum: Quorum,
     ) -> Option<Ballot> {
+        self.quorum = seq_paxos_quorum;
         self.update_leader();
         self.update_happiness(seq_paxos_state);
         self.check_takeover();

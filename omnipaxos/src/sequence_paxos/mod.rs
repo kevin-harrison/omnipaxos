@@ -4,7 +4,7 @@ use crate::utils::logger::create_logger;
 use crate::{
     storage::{
         internal_storage::{InternalStorage, InternalStorageConfig},
-        Entry, Snapshot, StopSign, Storage, LogEntry, QuorumConfig,
+        Entry, QuorumConfig, Snapshot, StopSign, Storage,
     },
     util::{
         FlexibleQuorum, LogSync, NodeId, Quorum, SequenceNumber, READ_ERROR_MSG, WRITE_ERROR_MSG,
@@ -83,7 +83,7 @@ where
             None => {
                 let initial_quorum = Quorum::with(config.flexible_quorum, num_nodes);
                 (QuorumConfig::Stable(initial_quorum), 0)
-            },
+            }
         };
         let internal_storage_config = InternalStorageConfig {
             batch_size: config.batch_size,
@@ -104,7 +104,7 @@ where
             buffered_quorum_config: None,
             buffered_stopsign: None,
             outgoing,
-            leader_state: LeaderState::<T>::with(leader, max_pid, quorum_config),
+            leader_state: LeaderState::<T>::with(leader, max_pid),
             latest_accepted_meta: None,
             current_seq_num: SequenceNumber::default(),
             cached_promise_message: None,
@@ -126,14 +126,7 @@ where
             .set_promise(leader)
             .expect(WRITE_ERROR_MSG);
         #[cfg(feature = "logging")]
-        {
-            info!(paxos.logger, "Paxos component pid: {} created!", pid);
-            if quorum.read_quorum_size > num_nodes - quorum.write_quorum_size + 1 {
-                warn!(
-                    paxos.logger,
-                    "Unnecessary overlaps in read and write quorums. Read and Write quorums only need to be overlapping by one node i.e., read_quorum_size + write_quorum_size = num_nodes + 1");
-            }
-        }
+        info!(paxos.logger, "Paxos component pid: {} created!", pid);
         paxos
     }
 
@@ -143,6 +136,10 @@ where
 
     pub(crate) fn get_promise(&self) -> Ballot {
         self.internal_storage.get_promise()
+    }
+
+    pub(crate) fn get_quorum(&self) -> Quorum {
+        self.internal_storage.get_quorum()
     }
 
     /// Initiates the trim process.
@@ -340,10 +337,13 @@ where
         Ok(())
     }
 
-    pub(crate) fn reconfigure_joint_consensus(&mut self, new_config: ClusterConfig) -> Result<(), ProposeErr<T>> {
+    pub(crate) fn reconfigure_joint_consensus(
+        &mut self,
+        new_config: ClusterConfig,
+    ) -> Result<(), ProposeErr<T>> {
         // TODO: support arbitrary reconfigurations
-        let new_config_has_current_nodes = new_config.nodes.contains(&self.pid) &&
-            self.peers.iter().all(|pid| new_config.nodes.contains(pid));
+        let new_config_has_current_nodes = new_config.nodes.contains(&self.pid)
+            && self.peers.iter().all(|pid| new_config.nodes.contains(pid));
         let new_config_has_no_extra_nodes = new_config.nodes.len() == self.peers.len() + 1;
         if !(new_config_has_current_nodes && new_config_has_no_extra_nodes) {
             unimplemented!("Haven't implemented joint consensus when changing nodes yet");
@@ -354,25 +354,26 @@ where
         match self.state.0 {
             Role::Leader => {
                 let cluster_size = self.peers.len() + 1;
+                let current_quorum = self.internal_storage.get_quorum();
                 let new_quorum = Quorum::with(new_config.flexible_quorum, cluster_size);
-                let new_quorum_has_overlap_property = self.leader_state.quorum.is_prepare_quorum(new_quorum.write_quorum_size);
+                let new_quorum_has_overlap_property =
+                    current_quorum.is_prepare_quorum(new_quorum.write_quorum_size);
                 let next_quorum = if new_quorum_has_overlap_property {
                     QuorumConfig::Stable(new_quorum)
                 } else {
                     let transitional_flex_quorum = Some(FlexibleQuorum {
-                        read_quorum_size: cluster_size - new_quorum.write_quorum_size + 1, 
-                        write_quorum_size: cluster_size - self.leader_state.quorum.read_quorum_size + 1,
+                        read_quorum_size: cluster_size - new_quorum.write_quorum_size + 1,
+                        write_quorum_size: cluster_size - current_quorum.read_quorum_size + 1,
                     });
                     let transition_quorum = Quorum::with(transitional_flex_quorum, cluster_size);
                     QuorumConfig::Transitional(transition_quorum, new_quorum)
                 };
                 match self.state.1 {
                     Phase::Accept => self.accept_quorum_config_leader(next_quorum),
-                    // TODO: make sure we cant have a pending config and buffered config
                     Phase::Prepare => self.buffered_quorum_config = Some(next_quorum),
-                    _ => self.forward_reconfig(new_config)
+                    _ => self.forward_reconfig(new_config),
                 }
-            },
+            }
             Role::Follower => self.forward_reconfig(new_config),
         }
         Ok(())
@@ -492,6 +493,8 @@ where
             decided_snapshot,
             suffix,
             sync_idx,
+            quorum_config: self.internal_storage.get_quorum_config().clone(),
+            quorum_config_idx: self.internal_storage.get_quorum_config_idx(),
             stopsign: self.internal_storage.get_stopsign(),
         }
     }

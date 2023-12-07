@@ -4,7 +4,7 @@ mod state_cache;
 use super::ballot_leader_election::Ballot;
 #[cfg(feature = "unicache")]
 use crate::unicache::*;
-use crate::{ClusterConfig, util::{NodeId, Quorum}};
+use crate::{util::Quorum, ClusterConfig};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 use std::{error::Error, fmt::Debug};
@@ -45,18 +45,34 @@ pub trait Entry: Clone + Debug {
     type UniCache: UniCache<T = Self> + Serialize + for<'a> Deserialize<'a>;
 }
 
+/// The elements of the log.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum LogEntry<T: Entry> {
+    /// An simple log entry.
     Entry(T),
+    /// A quorum reconfiguration log entry.
     NewQuorumConfig(QuorumConfig),
-} 
+}
 
-#[derive(Debug, Clone, PartialEq)]
+/// The current quorum of the configuration.
+#[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum QuorumConfig {
+    /// Current quorum config which won't change unless a reconfiguration is proposed.
+    Stable(Quorum),
+    /// (Current quorum, next quorum) will transition to stable next quorum once the config becomes decided.
     Transitional(Quorum, Quorum),
-    Stable(Quorum)
+}
+
+impl QuorumConfig {
+    /// Get the currently active quorum of this quorum config.
+    pub fn get_active_quorum(&self) -> Quorum {
+        match self {
+            QuorumConfig::Stable(q) => *q,
+            QuorumConfig::Transitional(q, _) => *q,
+        }
+    }
 }
 
 /// A StopSign entry that marks the end of a configuration. Used for reconfiguration.
@@ -130,6 +146,8 @@ pub enum StorageOp<T: Entry> {
     SetCompactedIdx(usize),
     /// Removes elements up to the given idx from storage.
     Trim(usize),
+    /// Set the current quorum config and the log index of its entry.
+    SetQuorumConfig(QuorumConfig, usize),
     /// Sets the StopSign used for reconfiguration.
     SetStopsign(Option<StopSign>),
     /// Sets the snapshot.
@@ -155,7 +173,8 @@ where
     fn append_entries(&mut self, entries: Vec<LogEntry<T>>) -> StorageResult<()>;
 
     /// Appends the entries of `entries` to the prefix from index `from_index` (inclusive) in the log.
-    fn append_on_prefix(&mut self, from_idx: usize, entries: Vec<LogEntry<T>>) -> StorageResult<()>;
+    fn append_on_prefix(&mut self, from_idx: usize, entries: Vec<LogEntry<T>>)
+        -> StorageResult<()>;
 
     /// Sets the round that has been promised.
     fn set_promise(&mut self, n_prom: Ballot) -> StorageResult<()>;
@@ -188,11 +207,11 @@ where
     fn get_promise(&self) -> StorageResult<Option<Ballot>>;
 
     /// Sets the current quorum configuration of the cluster and the index of its cooresponding entry.
-    fn set_quorum_config(&mut self, s: (QuorumConfig, usize)) -> StorageResult<()>;
+    fn set_quorum_config(&mut self, config: QuorumConfig, idx: usize) -> StorageResult<()>;
 
     /// Returns the stored QuorumConfig, returns `None` if no QuorumConfig has been stored.
     fn get_quorum_config(&self) -> StorageResult<Option<(QuorumConfig, usize)>>;
-    
+
     /// Sets the StopSign used for reconfiguration.
     fn set_stopsign(&mut self, s: Option<StopSign>) -> StorageResult<()>;
 

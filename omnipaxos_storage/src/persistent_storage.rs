@@ -1,6 +1,6 @@
 use omnipaxos::{
     ballot_leader_election::Ballot,
-    storage::{Entry, StopSign, Storage, StorageOp, StorageResult},
+    storage::{Entry, LogEntry, QuorumConfig, StopSign, Storage, StorageOp, StorageResult},
 };
 use rocksdb::{ColumnFamilyDescriptor, ColumnFamilyRef, Options, WriteBatchWithTransaction, DB};
 use serde::{Deserialize, Serialize};
@@ -13,6 +13,8 @@ const NPROM: &[u8] = b"NPROM";
 const ACC: &[u8] = b"ACC";
 const DECIDE: &[u8] = b"DECIDE";
 const TRIM: &[u8] = b"TRIM";
+const QUORUMCONFIG: &[u8] = b"QUORUMCONFIG";
+const QUORUMCONFIGIDX: &[u8] = b"QUORUMCONFIGIDX";
 const STOPSIGN: &[u8] = b"STOPSIGN";
 const SNAPSHOT: &[u8] = b"SNAPSHOT";
 
@@ -180,7 +182,7 @@ where
             .expect("Couldn't find RocksDB log column family")
     }
 
-    fn batch_append_entry(&mut self, entry: T) -> StorageResult<()> {
+    fn batch_append_entry(&mut self, entry: LogEntry<T>) -> StorageResult<()> {
         self.write_batch.put_cf(
             self.db.cf_handle(LOG).unwrap(),
             self.next_log_key.to_be_bytes(),
@@ -190,7 +192,7 @@ where
         Ok(())
     }
 
-    fn batch_append_entries(&mut self, entries: Vec<T>) -> StorageResult<()> {
+    fn batch_append_entries(&mut self, entries: Vec<LogEntry<T>>) -> StorageResult<()> {
         for entry in entries {
             self.write_batch.put_cf(
                 self.db.cf_handle(LOG).unwrap(),
@@ -202,7 +204,11 @@ where
         Ok(())
     }
 
-    fn batch_append_on_prefix(&mut self, from_idx: usize, entries: Vec<T>) -> StorageResult<()> {
+    fn batch_append_on_prefix(
+        &mut self,
+        from_idx: usize,
+        entries: Vec<LogEntry<T>>,
+    ) -> StorageResult<()> {
         // Don't need to delete entries that will be overwritten.
         let delete_idx = from_idx + entries.len();
         if delete_idx < self.next_log_key {
@@ -247,6 +253,14 @@ where
         Ok(())
     }
 
+    fn batch_set_quorum_config(&mut self, config: QuorumConfig, idx: usize) -> StorageResult<()> {
+        let config_bytes = bincode::serialize(&config)?;
+        let idx_bytes = usize::as_bytes(&idx);
+        self.write_batch.put(QUORUMCONFIG, config_bytes);
+        self.write_batch.put(QUORUMCONFIGIDX, idx_bytes);
+        Ok(())
+    }
+
     fn batch_set_stopsign(&mut self, s: Option<StopSign>) -> StorageResult<()> {
         let stopsign = bincode::serialize(&s)?;
         self.write_batch.put(STOPSIGN, stopsign);
@@ -288,6 +302,7 @@ where
                 StorageOp::SetAcceptedRound(bal) => self.batch_set_accepted_round(bal)?,
                 StorageOp::SetCompactedIdx(idx) => self.batch_set_compacted_idx(idx)?,
                 StorageOp::Trim(idx) => self.batch_trim(idx)?,
+                StorageOp::SetQuorumConfig(qc, idx) => self.batch_set_quorum_config(qc, idx)?,
                 StorageOp::SetStopsign(ss) => self.batch_set_stopsign(ss)?,
                 StorageOp::SetSnapshot(snap) => self.batch_set_snapshot(snap)?,
             }
@@ -295,7 +310,7 @@ where
         Ok(self.db.write(std::mem::take(&mut self.write_batch))?)
     }
 
-    fn append_entry(&mut self, entry: T) -> StorageResult<()> {
+    fn append_entry(&mut self, entry: LogEntry<T>) -> StorageResult<()> {
         let entry_bytes = bincode::serialize(&entry)?;
         self.db.put_cf(
             self.get_log_handle(),
@@ -306,7 +321,7 @@ where
         Ok(())
     }
 
-    fn append_entries(&mut self, entries: Vec<T>) -> StorageResult<()> {
+    fn append_entries(&mut self, entries: Vec<LogEntry<T>>) -> StorageResult<()> {
         let mut batch = WriteBatchWithTransaction::<false>::default();
         for entry in entries {
             batch.put_cf(
@@ -320,7 +335,11 @@ where
         Ok(())
     }
 
-    fn append_on_prefix(&mut self, from_idx: usize, entries: Vec<T>) -> StorageResult<()> {
+    fn append_on_prefix(
+        &mut self,
+        from_idx: usize,
+        entries: Vec<LogEntry<T>>,
+    ) -> StorageResult<()> {
         // Don't need to delete entries that will be overwritten.
         let delete_idx = from_idx + entries.len();
         if delete_idx < self.next_log_key {
@@ -333,7 +352,7 @@ where
         self.append_entries(entries)
     }
 
-    fn get_entries(&self, from: usize, to: usize) -> StorageResult<Vec<T>> {
+    fn get_entries(&self, from: usize, to: usize) -> StorageResult<Vec<LogEntry<T>>> {
         // Check if the log has entries up to the requested endpoint.
         if to > self.next_log_key || from >= to {
             return Ok(vec![]); // Do an early return
@@ -354,7 +373,7 @@ where
         Ok(self.next_log_key - self.get_compacted_idx()?)
     }
 
-    fn get_suffix(&self, from: usize) -> StorageResult<Vec<T>> {
+    fn get_suffix(&self, from: usize) -> StorageResult<Vec<LogEntry<T>>> {
         self.get_entries(from, self.next_log_key)
     }
 
@@ -414,6 +433,29 @@ where
     fn set_compacted_idx(&mut self, trimmed_idx: usize) -> StorageResult<()> {
         let trim_bytes = usize::as_bytes(&trimmed_idx);
         self.db.put(TRIM, trim_bytes)?;
+        Ok(())
+    }
+
+    fn get_quorum_config(&self) -> StorageResult<Option<(QuorumConfig, usize)>> {
+        let config = self.db.get_pinned(QUORUMCONFIG)?;
+        let config_idx = self.db.get_pinned(QUORUMCONFIGIDX)?;
+        match (config, config_idx) {
+            (Some(config_bytes), Some(idx_bytes)) => {
+                let q_config = bincode::deserialize(&config_bytes)?;
+                let idx = usize::read_from(idx_bytes.as_bytes()).ok_or(ErrHelper {})?;
+                Ok(Some((q_config, idx)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn set_quorum_config(&mut self, config: QuorumConfig, idx: usize) -> StorageResult<()> {
+        let config_bytes = bincode::serialize(&config)?;
+        let idx_bytes = usize::as_bytes(&idx);
+        let mut batch = WriteBatchWithTransaction::<false>::default();
+        batch.put(QUORUMCONFIG, config_bytes);
+        batch.put(QUORUMCONFIGIDX, idx_bytes);
+        self.db.write(batch)?;
         Ok(())
     }
 

@@ -20,8 +20,7 @@ where
         #[cfg(feature = "logging")]
         debug!(self.logger, "Newly elected leader: {:?}", n);
         if self.pid == n.pid {
-            self.leader_state =
-                LeaderState::with(n, self.leader_state.max_pid, self.internal_storage.get_quorum_config());
+            self.leader_state = LeaderState::with(n, self.leader_state.max_pid);
             // Flush any pending writes
             // Don't have to handle flushed entries here because we will sync with followers
             let _ = self.internal_storage.flush_batch().expect(WRITE_ERROR_MSG);
@@ -84,7 +83,7 @@ where
     }
 
     pub(crate) fn handle_forwarded_reconfig(&mut self, reconfig: ClusterConfig) {
-        self.reconfigure_joint_consensus(reconfig);
+        let _ = self.reconfigure_joint_consensus(reconfig);
     }
 
     pub(crate) fn handle_forwarded_stopsign(&mut self, ss: StopSign) {
@@ -139,15 +138,16 @@ where
     pub(crate) fn accept_quorum_config_leader(&mut self, quorum_config: QuorumConfig) {
         let accepted_metadata = self
             .internal_storage
-            .flush_and_append_quorum_config(quorum_config.clone())
+            .flush_and_append_quorum_config(quorum_config)
             .expect(WRITE_ERROR_MSG);
         let accepted_idx = self.internal_storage.get_accepted_idx();
+        // TODO: if we get a new quorum that makes it so we don't have enough promises we need to go
+        // back into prepare phase?
         self.leader_state.set_accepted_idx(self.pid, accepted_idx);
-        self.leader_state.update_quorum(quorum_config);
         if let Some(metadata) = accepted_metadata {
             self.send_acceptdecide(metadata);
         }
-        self.send_accept_quorum_config(quorum_config.clone());
+        self.send_accept_quorum_config(quorum_config);
     }
 
     pub(crate) fn accept_stopsign_leader(&mut self, ss: StopSign) {
@@ -314,6 +314,14 @@ where
                     .append_entries_without_batching(entries)
                     .expect(WRITE_ERROR_MSG);
             }
+            if !self.pending_quorum_reconfig() {
+                if let Some(config) = self.buffered_quorum_config.take() {
+                    self.internal_storage
+                        .append_quorum_config(config)
+                        .expect(WRITE_ERROR_MSG);
+                    new_accepted_idx = self.internal_storage.get_accepted_idx();
+                }
+            }
             if let Some(ss) = self.buffered_stopsign.take() {
                 self.internal_storage
                     .append_stopsign(ss)
@@ -336,8 +344,21 @@ where
             "Handling promise from {} in Prepare phase", from
         );
         if prom.n == self.leader_state.n_leader {
-            let received_majority = self.leader_state.set_promise(prom, from, true);
-            if received_majority {
+            let promised_nodes = self.leader_state.set_promise(prom, from, true);
+            if self
+                .internal_storage
+                .get_quorum()
+                .is_prepare_quorum(promised_nodes)
+            {
+                // TODO: Revisit quorum overlaps in recovery to see if this is necessary
+                // if let Some(sync) = self.leader_state.get_max_promise_sync() {
+                //     let next_quorum = sync.quorum_config.get_active_quorum();
+                //     if !next_quorum.is_prepare_quorum(promised_nodes) {
+                //         // TODO: is this ok? quorum is out of sync with quorum_config
+                //         self.internal_storage.set_quorum(next_quorum);
+                //         return;
+                //     }
+                // }
                 self.handle_majority_promises();
             }
         }
@@ -372,8 +393,9 @@ where
             self.leader_state
                 .set_accepted_idx(from, accepted.accepted_idx);
             let decided_idx = self.internal_storage.get_decided_idx();
+            let quorum = self.internal_storage.get_quorum();
             if accepted.accepted_idx > decided_idx
-                && self.leader_state.is_chosen(accepted.accepted_idx)
+                && self.leader_state.is_chosen(accepted.accepted_idx, quorum)
             {
                 let new_decided_idx = accepted.accepted_idx;
                 self.internal_storage
@@ -391,13 +413,10 @@ where
                         _ => self.send_decide(pid, new_decided_idx, false),
                     };
                 }
-                // TODO: Do we need to do a similar check for the syncing actions? Can
-                // handle_majority_promises decide an entry that wasn't decided in the max log?
                 let current_quorum_config = self.internal_storage.get_quorum_config();
                 if let QuorumConfig::Transitional(_, qc) = current_quorum_config {
                     let config_idx = self.internal_storage.get_quorum_config_idx();
-                    let config_became_decided = config_idx > decided_idx && config_idx <= new_decided_idx;
-                    if  config_became_decided {
+                    if config_idx <= new_decided_idx {
                         self.accept_quorum_config_leader(QuorumConfig::Stable(qc));
                     }
                 }

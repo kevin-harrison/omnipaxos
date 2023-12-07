@@ -3,10 +3,10 @@ use crate::{
     errors::{valid_config, ConfigError},
     messages::Message,
     sequence_paxos::SequencePaxos,
-    storage::{Entry, StopSign, Storage, LogEntry},
+    storage::{Entry, StopSign, Storage},
     util::{
         defaults::{BUFFER_SIZE, ELECTION_TIMEOUT, FLUSH_BATCH_TIMEOUT, RESEND_MESSAGE_TIMEOUT},
-        ConfigurationId, FlexibleQuorum, EntryRead, LogicalClock, NodeId,
+        ConfigurationId, EntryRead, FlexibleQuorum, LogicalClock, NodeId,
     },
     utils::{ui, ui::ClusterState},
 };
@@ -357,7 +357,7 @@ where
         &mut self,
         new_configuration: ClusterConfig,
         metadata: Option<Vec<u8>>,
-        use_joint_consensus: bool
+        // use_joint_consensus: bool,
     ) -> Result<(), ProposeErr<T>> {
         if let Err(config_error) = new_configuration.validate() {
             return Err(ProposeErr::ConfigError(
@@ -366,11 +366,13 @@ where
                 metadata,
             ));
         }
-        if use_joint_consensus {
-            self.seq_paxos.reconfigure_joint_consensus(new_configuration)
-        } else {
-            self.seq_paxos.reconfigure(new_configuration, metadata)
-        }
+        // TODO: allow joint consensus
+        // if use_joint_consensus {
+        //     self.seq_paxos
+        //         .reconfigure_joint_consensus(new_configuration)
+        // } else {
+        self.seq_paxos.reconfigure(new_configuration, metadata)
+        // }
     }
 
     /// Handles re-establishing a connection to a previously disconnected peer.
@@ -405,10 +407,11 @@ where
     /// It is also used for the election process, where the server checks if it can become the leader.
     /// For instance if `election_timeout()` is called every 100ms, then if the leader fails, the servers will detect it after 100ms and elect a new server after another 100ms if possible.
     fn election_timeout(&mut self) {
-        if let Some(new_leader) = self
-            .ble
-            .hb_timeout(self.seq_paxos.get_state(), self.seq_paxos.get_promise())
-        {
+        if let Some(new_leader) = self.ble.hb_timeout(
+            self.seq_paxos.get_state(),
+            self.seq_paxos.get_promise(),
+            self.seq_paxos.get_quorum(),
+        ) {
             self.seq_paxos.handle_leader(new_leader);
         }
     }

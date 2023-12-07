@@ -10,8 +10,9 @@ use serde::{Deserialize, Serialize};
 pub mod sequence_paxos {
     use crate::{
         ballot_leader_election::Ballot,
-        storage::{Entry, StopSign, LogEntry, QuorumConfig},
-        util::{LogSync, NodeId, SequenceNumber}, ClusterConfig,
+        storage::{Entry, QuorumConfig, StopSign},
+        util::{LogSync, NodeId, SequenceNumber},
+        ClusterConfig,
     };
     #[cfg(feature = "serde")]
     use serde::{Deserialize, Serialize};

@@ -4,7 +4,7 @@ use omnipaxos::{
     ballot_leader_election::Ballot,
     macros::*,
     messages::Message,
-    storage::{Entry, Snapshot, Storage, StorageResult},
+    storage::{Entry, LogEntry, QuorumConfig, Snapshot, Storage, StorageResult},
     util::{FlexibleQuorum, NodeId},
     ClusterConfig, OmniPaxosConfig, ServerConfig,
 };
@@ -258,7 +258,7 @@ where
         }
     }
 
-    fn append_entry(&mut self, entry: T) -> StorageResult<()> {
+    fn append_entry(&mut self, entry: LogEntry<T>) -> StorageResult<()> {
         match self {
             StorageType::Persistent(persist_s) => persist_s.append_entry(entry),
             StorageType::Memory(mem_s) => mem_s.append_entry(entry),
@@ -269,7 +269,7 @@ where
         }
     }
 
-    fn append_entries(&mut self, entries: Vec<T>) -> StorageResult<()> {
+    fn append_entries(&mut self, entries: Vec<LogEntry<T>>) -> StorageResult<()> {
         match self {
             StorageType::Persistent(persist_s) => persist_s.append_entries(entries),
             StorageType::Memory(mem_s) => mem_s.append_entries(entries),
@@ -280,7 +280,11 @@ where
         }
     }
 
-    fn append_on_prefix(&mut self, from_idx: usize, entries: Vec<T>) -> StorageResult<()> {
+    fn append_on_prefix(
+        &mut self,
+        from_idx: usize,
+        entries: Vec<LogEntry<T>>,
+    ) -> StorageResult<()> {
         match self {
             StorageType::Persistent(persist_s) => persist_s.append_on_prefix(from_idx, entries),
             StorageType::Memory(mem_s) => mem_s.append_on_prefix(from_idx, entries),
@@ -346,7 +350,7 @@ where
         }
     }
 
-    fn get_entries(&self, from: usize, to: usize) -> StorageResult<Vec<T>> {
+    fn get_entries(&self, from: usize, to: usize) -> StorageResult<Vec<LogEntry<T>>> {
         match self {
             StorageType::Persistent(persist_s) => persist_s.get_entries(from, to),
             StorageType::Memory(mem_s) => mem_s.get_entries(from, to),
@@ -368,7 +372,7 @@ where
         }
     }
 
-    fn get_suffix(&self, from: usize) -> StorageResult<Vec<T>> {
+    fn get_suffix(&self, from: usize) -> StorageResult<Vec<LogEntry<T>>> {
         match self {
             StorageType::Persistent(persist_s) => persist_s.get_suffix(from),
             StorageType::Memory(mem_s) => mem_s.get_suffix(from),
@@ -441,6 +445,28 @@ where
             StorageType::Broken(mem_s, conf) => {
                 conf.lock().unwrap().tick()?;
                 mem_s.lock().unwrap().get_compacted_idx()
+            }
+        }
+    }
+
+    fn set_quorum_config(&mut self, config: QuorumConfig, idx: usize) -> StorageResult<()> {
+        match self {
+            StorageType::Persistent(persist_s) => persist_s.set_quorum_config(config, idx),
+            StorageType::Memory(mem_s) => mem_s.set_quorum_config(config, idx),
+            StorageType::Broken(mem_s, conf) => {
+                conf.lock().unwrap().tick()?;
+                mem_s.lock().unwrap().set_quorum_config(config, idx)
+            }
+        }
+    }
+
+    fn get_quorum_config(&self) -> StorageResult<Option<(QuorumConfig, usize)>> {
+        match self {
+            StorageType::Persistent(persist_s) => persist_s.get_quorum_config(),
+            StorageType::Memory(mem_s) => mem_s.get_quorum_config(),
+            StorageType::Broken(mem_s, conf) => {
+                conf.lock().unwrap().tick()?;
+                mem_s.lock().unwrap().get_quorum_config()
             }
         }
     }

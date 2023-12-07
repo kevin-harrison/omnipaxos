@@ -107,7 +107,7 @@ where
             }
         }
     }
-    
+
     pub(crate) fn handle_accept_quorum_config(&mut self, acc_qc: AcceptQuorumConfig) {
         if self.check_valid_ballot(acc_qc.n)
             && self.state == (Role::Follower, Phase::Accept)

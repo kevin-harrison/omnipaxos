@@ -19,9 +19,13 @@ where
     /// The decided snapshot.
     pub decided_snapshot: Option<SnapshotType<T>>,
     /// The log suffix.
-    pub suffix: Vec<T>,
+    pub suffix: Vec<LogEntry<T>>,
     /// The index of the log where the entries from `suffix` should be applied at (also the compacted idx of `decided_snapshot` if it exists).
     pub sync_idx: usize,
+    /// The current quorum config
+    pub quorum_config: QuorumConfig,
+    /// The log index of the quorum config entry
+    pub quorum_config_idx: usize,
     /// The accepted StopSign.
     pub stopsign: Option<StopSign>,
 }
@@ -86,20 +90,13 @@ where
     max_promise_sync: Option<LogSync<T>>,
     batch_accept_meta: Vec<Option<(Ballot, usize)>>, //  index in outgoing
     pub max_pid: usize,
-    // The number of promises needed in the prepare phase to become synced and
-    // the number of accepteds needed in the accept phase to decide an entry.
-    pub quorum: Quorum,
 }
 
 impl<T> LeaderState<T>
 where
     T: Entry,
 {
-    pub fn with(n_leader: Ballot, max_pid: usize, quorum_config: QuorumConfig) -> Self {
-        let quorum = match quorum_config {
-            QuorumConfig::Stable(quorum) => quorum,
-            QuorumConfig::Transitional(quorum, _) => quorum,
-        };
+    pub fn with(n_leader: Ballot, max_pid: usize) -> Self {
         Self {
             n_leader,
             promises_meta: vec![PromiseState::NotPromised; max_pid],
@@ -109,7 +106,6 @@ where
             max_promise_sync: None,
             batch_accept_meta: vec![None; max_pid],
             max_pid,
-            quorum,
         }
     }
 
@@ -134,7 +130,8 @@ where
         self.follower_seq_nums[Self::pid_to_idx(pid)]
     }
 
-    pub fn set_promise(&mut self, prom: Promise<T>, from: NodeId, check_max_prom: bool) -> bool {
+    /// Returns the number of nodes promised to me
+    pub fn set_promise(&mut self, prom: Promise<T>, from: NodeId, check_max_prom: bool) -> usize {
         let promise_meta = PromiseMetaData {
             n_accepted: prom.n_accepted,
             accepted_idx: prom.accepted_idx,
@@ -146,12 +143,10 @@ where
             self.max_promise_sync = prom.log_sync;
         }
         self.promises_meta[Self::pid_to_idx(from)] = PromiseState::Promised(promise_meta);
-        let num_promised = self
-            .promises_meta
+        self.promises_meta
             .iter()
             .filter(|p| matches!(p, PromiseState::Promised(_)))
-            .count();
-        self.quorum.is_prepare_quorum(num_promised)
+            .count()
     }
 
     pub fn reset_promise(&mut self, pid: NodeId) {
@@ -165,6 +160,10 @@ where
 
     pub fn take_max_promise_sync(&mut self) -> Option<LogSync<T>> {
         std::mem::take(&mut self.max_promise_sync)
+    }
+
+    pub fn get_max_promise_sync(&self) -> &Option<LogSync<T>> {
+        &self.max_promise_sync
     }
 
     pub fn get_max_promise_meta(&self) -> &PromiseMetaData {
@@ -253,27 +252,19 @@ where
         *self.accepted_indexes.get(Self::pid_to_idx(pid)).unwrap()
     }
 
-    pub fn update_quorum(&mut self, quorum_config: QuorumConfig) {
-        match quorum_config {
-            QuorumConfig::Stable(quorum) => self.quorum = quorum,
-            QuorumConfig::Transitional(quorum, _) => self.quorum = quorum,
-        }
-    }
-
-    pub fn is_chosen(&self, idx: usize) -> bool {
+    pub fn is_chosen(&self, idx: usize, current_quorum: Quorum) -> bool {
         let num_accepted = self
             .accepted_indexes
             .iter()
             .filter(|la| **la >= idx)
             .count();
-        self.quorum.is_accept_quorum(num_accepted)
+        current_quorum.is_accept_quorum(num_accepted)
     }
 }
 
 /// The entry read in the log.
 #[derive(Debug, Clone)]
-pub enum EntryRead<T: Entry>
-{
+pub enum EntryRead<T: Entry> {
     /// The entry is decided.
     Decided(T),
     /// The entry is NOT decided. Might be removed from the log at a later time.
@@ -448,7 +439,10 @@ pub struct Quorum {
 }
 
 impl Quorum {
-    pub(crate) fn with(flexible_quorum_config: Option<FlexibleQuorum>, cluster_size: usize) -> Self {
+    pub(crate) fn with(
+        flexible_quorum_config: Option<FlexibleQuorum>,
+        cluster_size: usize,
+    ) -> Self {
         match flexible_quorum_config {
             None => Quorum {
                 read_quorum_size: cluster_size / 2 + 1,
