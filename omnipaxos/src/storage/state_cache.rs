@@ -1,4 +1,4 @@
-use super::{internal_storage::InternalStorageConfig, Entry, QuorumConfig, StopSign};
+use super::{internal_storage::InternalStorageConfig, Entry, QuorumConfig, StopSign, ConfigLog};
 use crate::{ballot_leader_election::Ballot, util::Quorum};
 #[cfg(feature = "unicache")]
 use crate::{unicache::*, util::NodeId};
@@ -25,10 +25,8 @@ where
     pub accepted_idx: usize,
     /// Garbage collected index.
     pub compacted_idx: usize,
-    /// The current quorum configuration.
-    pub quorum_config: QuorumConfig,
-    /// The log index of the current quorum configuration's entry.
-    pub quorum_config_idx: usize,
+    /// The current, shapshotted configuration log.
+    pub config_log: ConfigLog,
     /// The current, active quorum.
     pub quorum: Quorum,
     /// Stopsign entry.
@@ -46,6 +44,7 @@ where
 {
     pub(super) fn new(
         config: InternalStorageConfig,
+        cached_config_log: ConfigLog,
         #[cfg(feature = "unicache")] pid: NodeId,
     ) -> Self {
         StateCache {
@@ -58,9 +57,8 @@ where
             decided_idx: 0,
             accepted_idx: 0,
             compacted_idx: 0,
-            quorum_config: config.quorum_config,
-            quorum_config_idx: config.quorum_config_idx,
-            quorum: config.quorum_config.get_active_quorum(),
+            config_log: cached_config_log,
+            quorum: cached_config_log.config.get_active_quorum(),
             stopsign: None,
             #[cfg(feature = "unicache")]
             batched_processed_by_leader: Vec::with_capacity(config.batch_size),

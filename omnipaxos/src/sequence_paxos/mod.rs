@@ -31,7 +31,7 @@ where
     peers: Vec<NodeId>, // excluding self pid
     state: (Role, Phase),
     buffered_proposals: Vec<T>,
-    buffered_quorum_config: Option<QuorumConfig>,
+    buffered_reconfig: Option<ClusterConfig>,
     buffered_stopsign: Option<StopSign>,
     outgoing: Vec<PaxosMessage<T>>,
     leader_state: LeaderState<T>,
@@ -77,18 +77,10 @@ where
             }
             None => ((Role::Follower, Phase::None), Ballot::default()),
         };
-        let saved_quorum_config = storage.get_quorum_config().expect(WRITE_ERROR_MSG);
-        let (quorum_config, quorum_config_idx) = match saved_quorum_config {
-            Some((saved_quorum_config, idx)) => (saved_quorum_config, idx),
-            None => {
-                let initial_quorum = Quorum::with(config.flexible_quorum, num_nodes);
-                (QuorumConfig::Stable(initial_quorum), 0)
-            }
-        };
+        let initial_quorum = Quorum::with(config.flexible_quorum, num_nodes);
         let internal_storage_config = InternalStorageConfig {
             batch_size: config.batch_size,
-            quorum_config,
-            quorum_config_idx,
+            initial_quorum_config: QuorumConfig::Stable(initial_quorum),
         };
         let mut paxos = SequencePaxos {
             internal_storage: InternalStorage::with(
@@ -101,7 +93,7 @@ where
             peers,
             state,
             buffered_proposals: vec![],
-            buffered_quorum_config: None,
+            buffered_reconfig: None,
             buffered_stopsign: None,
             outgoing,
             leader_state: LeaderState::<T>::with(leader, max_pid),
@@ -275,11 +267,13 @@ where
             PaxosMsg::AcceptDecide(acc) => self.handle_acceptdecide(acc),
             PaxosMsg::NotAccepted(not_acc) => self.handle_notaccepted(not_acc, m.from),
             PaxosMsg::Accepted(accepted) => self.handle_accepted(accepted, m.from),
+            PaxosMsg::AcceptedConfig(accepted_con) => self.handle_accepted_config(accepted_con, m.from),
             PaxosMsg::Decide(d) => self.handle_decide(d),
+            PaxosMsg::DecideConfig(d_con) => self.handle_decide_config(d_con),
             PaxosMsg::ProposalForward(proposals) => self.handle_forwarded_proposal(proposals),
+            PaxosMsg::ReconfigForward(f_reconfig) => self.handle_forwarded_reconfig(f_reconfig),
             PaxosMsg::Compaction(c) => self.handle_compaction(c),
-            PaxosMsg::AcceptQuorumConfig(acc_qc) => self.handle_accept_quorum_config(acc_qc),
-            PaxosMsg::ForwardReconfig(f_reconfig) => self.handle_forwarded_reconfig(f_reconfig),
+            PaxosMsg::AcceptConfig(acc_con) => self.handle_accept_quorum_config(acc_con),
             PaxosMsg::AcceptStopSign(acc_ss) => self.handle_accept_stopsign(acc_ss),
             PaxosMsg::ForwardStopSign(f_ss) => self.handle_forwarded_stopsign(f_ss),
         }
@@ -299,7 +293,7 @@ where
     }
 
     fn pending_quorum_reconfig(&self) -> bool {
-        self.internal_storage.get_quorum_config_idx() > self.internal_storage.get_decided_idx()
+        !self.internal_storage.config_is_decided()
     }
 
     /// Append an entry to the replicated log.
@@ -351,32 +345,29 @@ where
         if self.pending_stopsign() || self.pending_quorum_reconfig() {
             return Err(ProposeErr::PendingReconfigConfig(new_config, None));
         }
-        match self.state.0 {
-            Role::Leader => {
-                let cluster_size = self.peers.len() + 1;
-                let current_quorum = self.internal_storage.get_quorum();
-                let new_quorum = Quorum::with(new_config.flexible_quorum, cluster_size);
-                let new_quorum_has_overlap_property =
-                    current_quorum.is_prepare_quorum(new_quorum.write_quorum_size);
-                let next_quorum = if new_quorum_has_overlap_property {
-                    QuorumConfig::Stable(new_quorum)
-                } else {
-                    let transitional_flex_quorum = Some(FlexibleQuorum {
-                        read_quorum_size: cluster_size - new_quorum.write_quorum_size + 1,
-                        write_quorum_size: cluster_size - current_quorum.read_quorum_size + 1,
-                    });
-                    let transition_quorum = Quorum::with(transitional_flex_quorum, cluster_size);
-                    QuorumConfig::Transitional(transition_quorum, new_quorum)
-                };
-                match self.state.1 {
-                    Phase::Accept => self.accept_quorum_config_leader(next_quorum),
-                    Phase::Prepare => self.buffered_quorum_config = Some(next_quorum),
-                    _ => self.forward_reconfig(new_config),
-                }
-            }
-            Role::Follower => self.forward_reconfig(new_config),
+        match self.state {
+           (Role::Leader, Phase::Accept) => self.accept_quorum_config_leader(self.create_next_quorum(new_config)),
+           (Role::Leader, Phase::Prepare) => self.buffered_reconfig = Some(new_config),
+           _ => self.forward_reconfig(new_config),
         }
         Ok(())
+    }
+
+    // TODO: documentation
+    fn create_next_quorum(&self, reconfiguration: ClusterConfig) -> QuorumConfig {
+        let cluster_size = self.peers.len() + 1;
+        let current_quorum = self.internal_storage.get_quorum();
+        let reconfigured_quorum = Quorum::with(reconfiguration.flexible_quorum, cluster_size);
+        if current_quorum.is_prepare_quorum(reconfigured_quorum.write_quorum_size) {
+            QuorumConfig::Stable(reconfigured_quorum)
+        } else {
+            let transitional_flex_quorum = Some(FlexibleQuorum {
+                read_quorum_size: cluster_size - reconfigured_quorum.write_quorum_size + 1,
+                write_quorum_size: cluster_size - current_quorum.read_quorum_size + 1,
+            });
+            let transition_quorum = Quorum::with(transitional_flex_quorum, cluster_size);
+            QuorumConfig::Transitional(transition_quorum, reconfigured_quorum)
+        }
     }
 
     fn get_current_leader(&self) -> NodeId {
@@ -450,7 +441,7 @@ where
         if leader > 0 && self.pid != leader {
             #[cfg(feature = "logging")]
             trace!(self.logger, "Forwarding reconfig to Leader {:?}", leader);
-            let forward_reconfig = PaxosMsg::ForwardReconfig(new_config);
+            let forward_reconfig = PaxosMsg::ReconfigForward(new_config);
             let msg = PaxosMessage {
                 from: self.pid,
                 to: leader,
@@ -493,7 +484,7 @@ where
             decided_snapshot,
             suffix,
             sync_idx,
-            quorum_config: self.internal_storage.get_quorum_config().clone(),
+            quorum_config: self.internal_storage.get_quorum_config(),
             quorum_config_idx: self.internal_storage.get_quorum_config_idx(),
             stopsign: self.internal_storage.get_stopsign(),
         }

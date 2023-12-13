@@ -45,14 +45,17 @@ pub trait Entry: Clone + Debug {
     type UniCache: UniCache<T = Self> + Serialize + for<'a> Deserialize<'a>;
 }
 
-/// The elements of the log.
-#[derive(Debug, Clone, PartialEq)]
+/// A snapshotted representation of the config log. The config log is used for
+/// replicating and ordering reconfigurations to the cluster.
+#[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-pub enum LogEntry<T: Entry> {
-    /// An simple log entry.
-    Entry(T),
-    /// A quorum reconfiguration log entry.
-    NewQuorumConfig(QuorumConfig),
+pub struct ConfigLog {
+    /// The current quorum configuration
+    pub config: QuorumConfig,
+    /// The accepted index of the config log.
+    pub accepted_idx: usize,
+    /// The decided index of the config log.
+    pub decided_idx: usize
 }
 
 /// The current quorum of the configuration.
@@ -131,11 +134,11 @@ pub type StorageResult<T> = Result<T, Box<dyn Error>>;
 #[derive(Debug)]
 pub enum StorageOp<T: Entry> {
     /// Appends an entry to the end of the log.
-    AppendEntry(LogEntry<T>),
+    AppendEntry(T),
     /// Appends entries to the end of the log.
-    AppendEntries(Vec<LogEntry<T>>),
+    AppendEntries(Vec<T>),
     /// Appends entries to the log from the prefix specified by the given index.
-    AppendOnPrefix(usize, Vec<LogEntry<T>>),
+    AppendOnPrefix(usize, Vec<T>),
     /// Sets the round that has been promised.
     SetPromise(Ballot),
     /// Sets the decided index in the log.
@@ -146,8 +149,8 @@ pub enum StorageOp<T: Entry> {
     SetCompactedIdx(usize),
     /// Removes elements up to the given idx from storage.
     Trim(usize),
-    /// Set the current quorum config and the log index of its entry.
-    SetQuorumConfig(QuorumConfig, usize),
+    /// Sets the entry of the current configuration.
+    SetConfig(ConfigLog),
     /// Sets the StopSign used for reconfiguration.
     SetStopsign(Option<StopSign>),
     /// Sets the snapshot.
@@ -167,13 +170,13 @@ where
     fn write_atomically(&mut self, ops: Vec<StorageOp<T>>) -> StorageResult<()>;
 
     /// Appends an entry to the end of the log.
-    fn append_entry(&mut self, entry: LogEntry<T>) -> StorageResult<()>;
+    fn append_entry(&mut self, entry: T) -> StorageResult<()>;
 
     /// Appends the entries of `entries` to the end of the log.
-    fn append_entries(&mut self, entries: Vec<LogEntry<T>>) -> StorageResult<()>;
+    fn append_entries(&mut self, entries: Vec<T>) -> StorageResult<()>;
 
     /// Appends the entries of `entries` to the prefix from index `from_index` (inclusive) in the log.
-    fn append_on_prefix(&mut self, from_idx: usize, entries: Vec<LogEntry<T>>)
+    fn append_on_prefix(&mut self, from_idx: usize, entries: Vec<T>)
         -> StorageResult<()>;
 
     /// Sets the round that has been promised.
@@ -194,23 +197,23 @@ where
 
     /// Returns the entries in the log in the index interval of [from, to).
     /// If entries **do not exist for the complete interval**, an empty Vector should be returned.
-    fn get_entries(&self, from: usize, to: usize) -> StorageResult<Vec<LogEntry<T>>>;
+    fn get_entries(&self, from: usize, to: usize) -> StorageResult<Vec<T>>;
 
     /// Returns the current length of the log.
     fn get_log_len(&self) -> StorageResult<usize>;
 
     /// Returns the suffix of entries in the log from index `from` (inclusive).
     /// If entries **do not exist for the complete interval**, an empty Vector should be returned.
-    fn get_suffix(&self, from: usize) -> StorageResult<Vec<LogEntry<T>>>;
+    fn get_suffix(&self, from: usize) -> StorageResult<Vec<T>>;
 
     /// Returns the round that has been promised.
     fn get_promise(&self) -> StorageResult<Option<Ballot>>;
 
-    /// Sets the current quorum configuration of the cluster and the index of its cooresponding entry.
-    fn set_quorum_config(&mut self, config: QuorumConfig, idx: usize) -> StorageResult<()>;
+    /// Sets the entry of the current configuration.
+    fn set_config(&mut self, config: ConfigLog) -> StorageResult<()>;
 
-    /// Returns the stored QuorumConfig, returns `None` if no QuorumConfig has been stored.
-    fn get_quorum_config(&self) -> StorageResult<Option<(QuorumConfig, usize)>>;
+    /// Gets entry of the current configuration.
+    fn get_config(&self) -> StorageResult<Option<ConfigLog>>;
 
     /// Sets the StopSign used for reconfiguration.
     fn set_stopsign(&mut self, s: Option<StopSign>) -> StorageResult<()>;

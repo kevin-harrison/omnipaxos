@@ -127,13 +127,35 @@ pub mod sequence_paxos {
     /// Message sent by leader to followers to accept a new quorum config.
     #[derive(Clone, Debug)]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-    pub struct AcceptQuorumConfig {
+    pub struct AcceptConfig {
         /// The current round.
         pub n: Ballot,
         /// The sequence number of this message in the leader-to-follower accept sequence
         pub seq_num: SequenceNumber,
         /// The quorum config.
         pub quorum_config: QuorumConfig,
+    }
+
+    /// Message sent by follower to leader when entries in the config log have been accepted.
+    #[derive(Copy, Clone, Debug)]
+    #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+    pub struct AcceptedConfig {
+        /// The current round.
+        pub n: Ballot,
+        /// The accepted index.
+        pub accepted_idx: usize,
+    }
+
+    /// Message sent by leader to followers to decide entries in the config log.
+    #[derive(Copy, Clone, Debug)]
+    #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+    pub struct DecideConfig {
+        /// The current round.
+        pub n: Ballot,
+        /// The sequence number of this message in the leader-to-follower accept sequence
+        pub seq_num: SequenceNumber,
+        /// The decided index.
+        pub decided_idx: usize,
     }
 
     /// Message sent by leader to followers to accept a StopSign
@@ -186,9 +208,11 @@ pub mod sequence_paxos {
         Decide(Decide),
         /// Forward client proposals to the leader.
         ProposalForward(Vec<T>),
+        ReconfigForward(ClusterConfig),
         Compaction(Compaction),
-        AcceptQuorumConfig(AcceptQuorumConfig),
-        ForwardReconfig(ClusterConfig),
+        AcceptConfig(AcceptConfig),
+        AcceptedConfig(AcceptedConfig),
+        DecideConfig(DecideConfig),
         AcceptStopSign(AcceptStopSign),
         ForwardStopSign(StopSign),
     }

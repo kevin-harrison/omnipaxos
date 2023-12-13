@@ -1,8 +1,8 @@
-use super::{state_cache::StateCache, LogEntry, QuorumConfig};
+use super::{state_cache::StateCache, QuorumConfig, ConfigLog};
 use crate::{
     ballot_leader_election::Ballot,
     storage::{Entry, Snapshot, SnapshotType, StopSign, Storage, StorageOp, StorageResult},
-    util::{AcceptedMetaData, EntryRead, IndexEntry, LogSync, Quorum, SnapshottedEntry},
+    util::{AcceptedMetaData, EntryRead, IndexEntry, LogSync, Quorum, SnapshottedEntry, FlexibleQuorum},
     CompactionErr,
 };
 #[cfg(feature = "unicache")]
@@ -15,8 +15,7 @@ use std::{
 
 pub(crate) struct InternalStorageConfig {
     pub(crate) batch_size: usize,
-    pub(crate) quorum_config: QuorumConfig,
-    pub(crate) quorum_config_idx: usize,
+    pub(crate) initial_quorum_config: QuorumConfig,
 }
 
 /// Internal representation of storage. Serves as the interface between Sequence Paxos and the
@@ -41,10 +40,15 @@ where
         config: InternalStorageConfig,
         #[cfg(feature = "unicache")] pid: NodeId,
     ) -> Self {
+        let cached_config_log = storage
+            .get_config()
+            .expect("Failed to load cache from storage.")
+            .unwrap_or_else(|| Self::create_initial_config_entry(config.initial_quorum_config));
         let mut internal_store = InternalStorage {
             storage,
             state_cache: StateCache::new(
                 config,
+                cached_config_log,
                 #[cfg(feature = "unicache")]
                 pid,
             ),
@@ -52,6 +56,14 @@ where
         };
         internal_store.load_cache();
         internal_store
+    }
+
+    fn create_initial_config_entry(quorum_config: QuorumConfig) -> ConfigLog {
+        ConfigLog {
+            config: quorum_config,
+            accepted_idx: 0,
+            decided_idx: 0,
+        }
     }
 
     fn load_cache(&mut self) {
@@ -187,15 +199,9 @@ where
             .map(|(idx, e)| {
                 let log_idx = idx + from;
                 if log_idx < decided_idx {
-                    match e {
-                        LogEntry::Entry(e) => EntryRead::Decided(e),
-                        LogEntry::NewQuorumConfig(qc) => EntryRead::DecidedQuorumConfig(qc),
-                    }
+                    EntryRead::Decided(e)
                 } else {
-                    match e {
-                        LogEntry::Entry(e) => EntryRead::Undecided(e),
-                        LogEntry::NewQuorumConfig(qc) => EntryRead::UndecidedQuorumConfig(qc),
-                    }
+                    EntryRead::Undecided(e)
                 }
             })
             .collect();
@@ -243,6 +249,20 @@ where
         };
         self.append_quorum_config(quorum_config)?;
         accepted_metadata
+    }
+
+    pub(crate) fn append_quorum_config(&mut self, config: QuorumConfig) -> StorageResult<usize> {
+        // TODO: Batched entries should be flushed first so we can accept
+        assert!(self.state_cache.batched_entries.is_empty());
+        let config_log = ConfigLog {
+            config,
+            accepted_idx: self.state_cache.config_log.accepted_idx + 1,
+            decided_idx: self.state_cache.config_log.decided_idx,
+        };
+        self.storage.set_config(config_log)?;
+        self.state_cache.config_log = config_log;
+        self.state_cache.quorum = config.get_active_quorum();
+        Ok(config_log.accepted_idx)
     }
 
     // Flushes batched entries and appends a stopsign to the log. Returns the AcceptedMetaData
@@ -329,8 +349,7 @@ where
         entries: Vec<T>,
     ) -> StorageResult<usize> {
         let num_new_entries = entries.len();
-        self.storage
-            .append_entries(entries.into_iter().map(|e| LogEntry::Entry(e)).collect())?;
+        self.storage.append_entries(entries)?;
         self.state_cache.accepted_idx += num_new_entries;
         Ok(self.state_cache.accepted_idx)
     }
@@ -367,31 +386,49 @@ where
             }
             self.state_cache.accepted_idx = sync.sync_idx + sync.suffix.len();
             sync_txn.push(StorageOp::AppendOnPrefix(sync.sync_idx, sync.suffix));
-            match sync.quorum_config {
-                QuorumConfig::Transitional(_, qc) if sync.quorum_config_idx <= decided_idx => {
-                    let next_config = QuorumConfig::Stable(qc);
-                    sync_txn.push(StorageOp::AppendEntry(LogEntry::NewQuorumConfig(
-                        next_config,
-                    )));
+            match sync.config_entry.config {
+                QuorumConfig::Transitional(_, qc) if sync.config_entry.log_idx <= decided_idx => {
                     self.state_cache.accepted_idx += 1;
-                    sync_txn.push(StorageOp::SetQuorumConfig(
-                        next_config,
-                        self.state_cache.accepted_idx,
-                    ));
-                    self.state_cache.quorum_config = next_config;
-                    self.state_cache.quorum_config_idx = self.state_cache.accepted_idx;
-                    self.state_cache.quorum = next_config.get_active_quorum();
+                    let next_config_entry = ConfigLog {
+                        config: QuorumConfig::Stable(qc),
+                        log_idx: self.state_cache.accepted_idx,
+                        config_log_idx: sync.config_entry.config_log_idx + 1,
+                    };
+                    sync_txn.push(StorageOp::SetConfig(next_config_entry));
+                    self.state_cache.config_entry = next_config_entry;
+                    self.state_cache.quorum = next_config_entry.config.get_active_quorum();
                 }
                 _ => {
-                    sync_txn.push(StorageOp::SetQuorumConfig(
-                        sync.quorum_config,
-                        sync.quorum_config_idx,
-                    ));
-                    self.state_cache.quorum_config = sync.quorum_config;
-                    self.state_cache.quorum_config_idx = sync.quorum_config_idx;
-                    self.state_cache.quorum = sync.quorum_config.get_active_quorum();
+
                 }
             }
+
+
+            // match sync.quorum_config {
+            //     QuorumConfig::Transitional(_, qc) if sync.quorum_config_idx <= decided_idx => {
+            //         let next_config = QuorumConfig::Stable(qc);
+            //         sync_txn.push(StorageOp::AppendEntry(LogEntry::NewQuorumConfig(
+            //             next_config,
+            //         )));
+            //         self.state_cache.accepted_idx += 1;
+            //         sync_txn.push(StorageOp::SetQuorumConfig(
+            //             next_config,
+            //             self.state_cache.accepted_idx,
+            //         ));
+            //         self.state_cache.quorum_config = next_config;
+            //         self.state_cache.quorum_config_idx = self.state_cache.accepted_idx;
+            //         self.state_cache.quorum = next_config.get_active_quorum();
+            //     }
+            //     _ => {
+            //         sync_txn.push(StorageOp::SetQuorumConfig(
+            //             sync.quorum_config,
+            //             sync.quorum_config_idx,
+            //         ));
+            //         self.state_cache.quorum_config = sync.quorum_config;
+            //         self.state_cache.quorum_config_idx = sync.quorum_config_idx;
+            //         self.state_cache.quorum = sync.quorum_config.get_active_quorum();
+            //     }
+            // }
             match sync.stopsign {
                 Some(ss) => {
                     self.state_cache.stopsign = Some(ss.clone());
@@ -421,13 +458,7 @@ where
         }
         let entries = self
             .storage
-            .get_entries(current_compacted_idx, compact_idx)?
-            .into_iter()
-            .filter_map(|log_entry| match log_entry {
-                LogEntry::Entry(e) => Some(e),
-                LogEntry::NewQuorumConfig(_) => None,
-            })
-            .collect::<Vec<T>>();
+            .get_entries(current_compacted_idx, compact_idx)?;
         let delta = T::Snapshot::create(entries.as_slice());
         match self.storage.get_snapshot()? {
             Some(mut s) => {
@@ -460,13 +491,7 @@ where
             }
         } else {
             let diff_entries = self
-                .get_entries(from_idx, log_decided_idx)?
-                .into_iter()
-                .filter_map(|log_entry| match log_entry {
-                    LogEntry::Entry(e) => Some(e),
-                    LogEntry::NewQuorumConfig(_) => None,
-                })
-                .collect::<Vec<T>>();
+                .get_entries(from_idx, log_decided_idx)?;
             Some(SnapshotType::Delta(T::Snapshot::create(
                 diff_entries.as_slice(),
             )))
@@ -540,7 +565,7 @@ where
         self.state_cache.accepted_round
     }
 
-    pub(crate) fn get_entries(&self, from: usize, to: usize) -> StorageResult<Vec<LogEntry<T>>> {
+    pub(crate) fn get_entries(&self, from: usize, to: usize) -> StorageResult<Vec<T>> {
         self.storage.get_entries(from, to)
     }
 
@@ -549,7 +574,7 @@ where
         self.state_cache.accepted_idx
     }
 
-    pub(crate) fn get_suffix(&self, from: usize) -> StorageResult<Vec<LogEntry<T>>> {
+    pub(crate) fn get_suffix(&self, from: usize) -> StorageResult<Vec<T>> {
         self.storage.get_suffix(from)
     }
 
@@ -577,40 +602,29 @@ where
         self.state_cache.stopsign_is_decided()
     }
 
-    pub(crate) fn append_quorum_config(&mut self, config: QuorumConfig) -> StorageResult<usize> {
-        self.storage
-            .append_entry(LogEntry::NewQuorumConfig(config))?;
-        self.state_cache.accepted_idx += 1;
-        self.set_quorum_config(config, self.state_cache.accepted_idx)?;
-        Ok(self.state_cache.accepted_idx)
-    }
-
-    pub(crate) fn set_quorum_config(
-        &mut self,
-        config: QuorumConfig,
-        idx: usize,
-    ) -> StorageResult<()> {
-        self.storage.set_quorum_config(config, idx)?;
-        self.state_cache.quorum_config = config;
-        self.state_cache.quorum_config_idx = idx;
-        self.state_cache.quorum = config.get_active_quorum();
-        Ok(())
-    }
-
     pub(crate) fn get_quorum_config(&self) -> QuorumConfig {
-        self.state_cache.quorum_config
-    }
-
-    pub(crate) fn get_quorum_config_idx(&self) -> usize {
-        self.state_cache.quorum_config_idx
-    }
-
-    pub(crate) fn set_quorum(&mut self, quorum: Quorum) {
-        self.state_cache.quorum = quorum;
+        self.state_cache.config_log.config
     }
 
     pub(crate) fn get_quorum(&self) -> Quorum {
         self.state_cache.quorum
+    }
+
+    pub(crate) fn get_config_accepted_idx(&self) -> usize {
+        self.state_cache.config_log.accepted_idx
+    }
+
+    pub(crate) fn get_config_decided_idx(&self) -> usize {
+        self.state_cache.config_log.decided_idx
+    }
+    
+    pub(crate) fn set_config_decided_idx(&mut self, decided_idx: usize) -> StorageResult<()> {
+        self.state_cache.config_log.decided_idx = decided_idx;
+        self.storage.set_config(self.state_cache.config_log)
+    }
+
+    pub(crate) fn config_is_decided(&self) -> bool {
+        self.state_cache.config_log.decided_idx == self.state_cache.config_log.accepted_idx
     }
 
     pub(crate) fn get_snapshot(&self) -> StorageResult<Option<T::Snapshot>> {

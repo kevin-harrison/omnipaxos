@@ -1,4 +1,4 @@
-use crate::storage::{LogEntry, QuorumConfig};
+use crate::storage::{QuorumConfig, ConfigLog};
 
 use super::{
     ballot_leader_election::Ballot,
@@ -19,13 +19,11 @@ where
     /// The decided snapshot.
     pub decided_snapshot: Option<SnapshotType<T>>,
     /// The log suffix.
-    pub suffix: Vec<LogEntry<T>>,
+    pub suffix: Vec<T>,
     /// The index of the log where the entries from `suffix` should be applied at (also the compacted idx of `decided_snapshot` if it exists).
     pub sync_idx: usize,
-    /// The current quorum config
-    pub quorum_config: QuorumConfig,
-    /// The log index of the quorum config entry
-    pub quorum_config_idx: usize,
+    /// The entry of the current configuration.
+    pub config_entry: ConfigLog,
     /// The accepted StopSign.
     pub stopsign: Option<StopSign>,
 }
@@ -86,6 +84,7 @@ where
     // the sequence number of accepts for each follower where AcceptSync has sequence number = 1
     follower_seq_nums: Vec<SequenceNumber>,
     pub accepted_indexes: Vec<usize>,
+    pub config_accepted_indexes: Vec<usize>,
     max_promise_meta: PromiseMetaData,
     max_promise_sync: Option<LogSync<T>>,
     batch_accept_meta: Vec<Option<(Ballot, usize)>>, //  index in outgoing
@@ -102,6 +101,7 @@ where
             promises_meta: vec![PromiseState::NotPromised; max_pid],
             follower_seq_nums: vec![SequenceNumber::default(); max_pid],
             accepted_indexes: vec![0; max_pid],
+            config_accepted_indexes: vec![0; max_pid],
             max_promise_meta: PromiseMetaData::default(),
             max_promise_sync: None,
             batch_accept_meta: vec![None; max_pid],
@@ -233,6 +233,10 @@ where
         self.accepted_indexes[Self::pid_to_idx(pid)] = idx;
     }
 
+    pub fn set_config_accepted_idx(&mut self, pid: NodeId, idx: usize) {
+        self.config_accepted_indexes[Self::pid_to_idx(pid)] = idx;
+    }
+
     pub fn get_batch_accept_meta(&self, pid: NodeId) -> Option<(Ballot, usize)> {
         self.batch_accept_meta
             .get(Self::pid_to_idx(pid))
@@ -255,6 +259,15 @@ where
     pub fn is_chosen(&self, idx: usize, current_quorum: Quorum) -> bool {
         let num_accepted = self
             .accepted_indexes
+            .iter()
+            .filter(|la| **la >= idx)
+            .count();
+        current_quorum.is_accept_quorum(num_accepted)
+    }
+
+    pub fn is_config_chosen(&self, idx: usize, current_quorum: Quorum) -> bool {
+        let num_accepted = self
+            .config_accepted_indexes
             .iter()
             .filter(|la| **la >= idx)
             .count();

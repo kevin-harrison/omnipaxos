@@ -140,13 +140,16 @@ where
             .internal_storage
             .flush_and_append_quorum_config(quorum_config)
             .expect(WRITE_ERROR_MSG);
-        let accepted_idx = self.internal_storage.get_accepted_idx();
-        // TODO: if we get a new quorum that makes it so we don't have enough promises we need to go
-        // back into prepare phase?
-        self.leader_state.set_accepted_idx(self.pid, accepted_idx);
         if let Some(metadata) = accepted_metadata {
+            self.leader_state.set_accepted_idx(self.pid, metadata.accepted_idx);
             self.send_acceptdecide(metadata);
         }
+        // TODO: if we get a new quorum that makes it so we don't have enough promises we need to go
+        // back into prepare phase?
+        // TODO: do we to revisit prev entries to check if they are now decided in the new quorum
+        // definition? Maybe on syncing we would have to?
+        let config_idx = self.internal_storage.get_config_accepted_idx();
+        self.leader_state.set_config_accepted_idx(self.pid, config_idx);
         self.send_accept_quorum_config(quorum_config);
     }
 
@@ -249,10 +252,11 @@ where
 
     fn send_accept_quorum_config(&mut self, quorum_config: QuorumConfig) {
         for pid in self.leader_state.get_promised_followers() {
+            // TODO: might be able to remove this and keep safety since config log is separate now
             // Reset message batching since quorum config isn't batched with entries but must still
             // retain its order among the entries.
             self.leader_state.set_batch_accept_meta(pid, None);
-            let acc_qc = PaxosMsg::AcceptQuorumConfig(AcceptQuorumConfig {
+            let acc_qc = PaxosMsg::AcceptConfig(AcceptConfig {
                 seq_num: self.leader_state.next_seq_num(pid),
                 n: self.leader_state.n_leader,
                 quorum_config,
@@ -301,6 +305,7 @@ where
 
     fn handle_majority_promises(&mut self) {
         let max_promise_sync = self.leader_state.take_max_promise_sync();
+        // TODO: is this ok for decided idx when quorums are now changing?
         let decided_idx = self.leader_state.get_max_decided_idx();
         let mut new_accepted_idx = self
             .internal_storage
@@ -315,9 +320,9 @@ where
                     .expect(WRITE_ERROR_MSG);
             }
             if !self.pending_quorum_reconfig() {
-                if let Some(config) = self.buffered_quorum_config.take() {
+                if let Some(config) = self.buffered_reconfig.take() {
                     self.internal_storage
-                        .append_quorum_config(config)
+                        .append_quorum_config(self.create_next_quorum(config))
                         .expect(WRITE_ERROR_MSG);
                     new_accepted_idx = self.internal_storage.get_accepted_idx();
                 }
@@ -389,13 +394,13 @@ where
             self.internal_storage.get_decided_idx(),
             self.leader_state.accepted_indexes
         );
-        if accepted.n == self.leader_state.n_leader && self.state == (Role::Leader, Phase::Accept) {
-            self.leader_state
-                .set_accepted_idx(from, accepted.accepted_idx);
-            let decided_idx = self.internal_storage.get_decided_idx();
-            let quorum = self.internal_storage.get_quorum();
-            if accepted.accepted_idx > decided_idx
-                && self.leader_state.is_chosen(accepted.accepted_idx, quorum)
+        if accepted.n != self.leader_state.n_leader || self.state != (Role::Leader, Phase::Accept) {
+            return;
+        }
+        self.leader_state.set_accepted_idx(from, accepted.accepted_idx);
+        let quorum = self.internal_storage.get_quorum();
+        if accepted.accepted_idx > self.internal_storage.get_decided_idx()
+            && self.leader_state.is_chosen(accepted.accepted_idx, quorum)
             {
                 let new_decided_idx = accepted.accepted_idx;
                 self.internal_storage
@@ -413,15 +418,42 @@ where
                         _ => self.send_decide(pid, new_decided_idx, false),
                     };
                 }
+            }
+    }
+
+    pub(crate) fn handle_accepted_config(&mut self, acc_config: AcceptedConfig, from: NodeId) {
+        if acc_config.n != self.leader_state.n_leader || self.state != (Role::Leader, Phase::Accept) {
+            return;
+        }
+        self.leader_state.set_config_accepted_idx(from, acc_config.accepted_idx);
+        let quorum = self.internal_storage.get_quorum();
+        if acc_config.accepted_idx > self.internal_storage.get_config_decided_idx() 
+            && self.leader_state.is_config_chosen(acc_config.accepted_idx, quorum) {
+                let new_decided_idx = acc_config.accepted_idx;
+                self.internal_storage
+                    .set_config_decided_idx(new_decided_idx)
+                    .expect(WRITE_ERROR_MSG);
+                for pid in self.leader_state.get_promised_followers() {
+                    // TODO: might be able to remove this line and keep safety
+                    self.leader_state.set_batch_accept_meta(pid, None);
+                    let acc_qc = PaxosMsg::DecideConfig(DecideConfig {
+                            seq_num: self.leader_state.next_seq_num(pid),
+                            n: self.leader_state.n_leader,
+                            decided_idx: new_decided_idx,
+                        });
+                    self.outgoing.push(PaxosMessage {
+                        from: self.pid,
+                        to: pid,
+                        msg: acc_qc,
+                    });
+                }
                 let current_quorum_config = self.internal_storage.get_quorum_config();
                 if let QuorumConfig::Transitional(_, qc) = current_quorum_config {
-                    let config_idx = self.internal_storage.get_quorum_config_idx();
-                    if config_idx <= new_decided_idx {
+                    if self.internal_storage.config_is_decided() {
                         self.accept_quorum_config_leader(QuorumConfig::Stable(qc));
                     }
                 }
             }
-        }
     }
 
     pub(crate) fn handle_notaccepted(&mut self, not_acc: NotAccepted, from: NodeId) {
