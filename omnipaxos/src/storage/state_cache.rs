@@ -1,4 +1,4 @@
-use super::{internal_storage::InternalStorageConfig, Entry, QuorumConfig, StopSign, ConfigLog};
+use super::{internal_storage::InternalStorageConfig, ConfigLog, Entry, StopSign};
 use crate::{ballot_leader_election::Ballot, util::Quorum};
 #[cfg(feature = "unicache")]
 use crate::{unicache::*, util::NodeId};

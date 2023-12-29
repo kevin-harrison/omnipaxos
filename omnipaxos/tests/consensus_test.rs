@@ -2,7 +2,7 @@ pub mod utils;
 
 use kompact::prelude::{promise, Ask, FutureCollection};
 use omnipaxos::{
-    storage::{LogEntry, Snapshot, StopSign, Storage},
+    storage::{Snapshot, StopSign, Storage},
     ClusterConfig, OmniPaxosConfig,
 };
 use serial_test::serial;
@@ -76,12 +76,7 @@ fn read_test() {
     let temp_dir = create_temp_dir();
     let mut storage = StorageType::<Value>::with(cfg.storage_type, &temp_dir);
     storage
-        .append_entries(
-            log.clone()
-                .into_iter()
-                .map(|e| LogEntry::Entry(e))
-                .collect(),
-        )
+        .append_entries(log.clone())
         .expect("Failed to append entries");
     storage
         .set_decided_idx(decided_idx)
@@ -133,12 +128,7 @@ fn read_test() {
     );
     let log_len = log.len();
     stopped_storage
-        .append_entries(
-            log.clone()
-                .into_iter()
-                .map(|e| LogEntry::Entry(e))
-                .collect(),
-        )
+        .append_entries(log)
         .expect("Failed to append entries");
     stopped_storage
         .set_stopsign(Some(ss.clone()))
@@ -175,12 +165,7 @@ fn read_entries_test() {
     let temp_dir = create_temp_dir();
     let mut storage = StorageType::<Value>::with(cfg.storage_type, &temp_dir);
     storage
-        .append_entries(
-            log.clone()
-                .into_iter()
-                .map(|e| LogEntry::Entry(e))
-                .collect(),
-        )
+        .append_entries(log.clone())
         .expect("Failed to append entries");
     storage
         .set_decided_idx(decided_idx)
@@ -238,12 +223,7 @@ fn read_entries_test() {
     );
     let log_len = log.len();
     stopped_storage
-        .append_entries(
-            log.clone()
-                .into_iter()
-                .map(|e| LogEntry::Entry(e))
-                .collect(),
-        )
+        .append_entries(log.clone())
         .expect("Failed to append entries");
     stopped_storage.set_stopsign(Some(ss.clone())).unwrap();
     stopped_storage.set_decided_idx(log_len + 1).unwrap();

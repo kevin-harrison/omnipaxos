@@ -3,10 +3,10 @@ use crate::{
     errors::{valid_config, ConfigError},
     messages::Message,
     sequence_paxos::SequencePaxos,
-    storage::{Entry, StopSign, Storage},
+    storage::{Entry, QuorumConfig, StopSign, Storage},
     util::{
         defaults::{BUFFER_SIZE, ELECTION_TIMEOUT, FLUSH_BATCH_TIMEOUT, RESEND_MESSAGE_TIMEOUT},
-        ConfigurationId, EntryRead, FlexibleQuorum, LogicalClock, NodeId,
+        ConfigurationId, FlexibleQuorum, LogEntry, LogicalClock, NodeId,
     },
     utils::{ui, ui::ClusterState},
 };
@@ -300,7 +300,7 @@ where
     }
 
     /// Read entry at index `idx` in the log. Returns `None` if `idx` is out of bounds.
-    pub fn read(&self, idx: usize) -> Option<EntryRead<T>> {
+    pub fn read(&self, idx: usize) -> Option<LogEntry<T>> {
         match self
             .seq_paxos
             .internal_storage
@@ -313,7 +313,7 @@ where
     }
 
     /// Read entries in the range `r` in the log. Returns `None` if `r` is out of bounds.
-    pub fn read_entries<R>(&self, r: R) -> Option<Vec<EntryRead<T>>>
+    pub fn read_entries<R>(&self, r: R) -> Option<Vec<LogEntry<T>>>
     where
         R: RangeBounds<usize>,
     {
@@ -324,7 +324,7 @@ where
     }
 
     /// Read all decided entries from `from_idx` in the log. Returns `None` if `from_idx` is out of bounds.
-    pub fn read_decided_suffix(&self, from_idx: usize) -> Option<Vec<EntryRead<T>>> {
+    pub fn read_decided_suffix(&self, from_idx: usize) -> Option<Vec<LogEntry<T>>> {
         self.seq_paxos
             .internal_storage
             .read_decided_suffix(from_idx)
@@ -357,7 +357,6 @@ where
         &mut self,
         new_configuration: ClusterConfig,
         metadata: Option<Vec<u8>>,
-        // use_joint_consensus: bool,
     ) -> Result<(), ProposeErr<T>> {
         if let Err(config_error) = new_configuration.validate() {
             return Err(ProposeErr::ConfigError(
@@ -366,13 +365,31 @@ where
                 metadata,
             ));
         }
-        // TODO: allow joint consensus
-        // if use_joint_consensus {
-        //     self.seq_paxos
-        //         .reconfigure_joint_consensus(new_configuration)
-        // } else {
         self.seq_paxos.reconfigure(new_configuration, metadata)
-        // }
+    }
+
+    /// Propose a cluster reconfiguration using joint consensus. Returns an error if the current
+    /// configuration is already undergoing a reconfiguration or if the `new_configuration` is invalid.
+    /// `new_configuration` defines the cluster-wide configuration settings for the **next** cluster configuration.
+    pub fn reconfigure_joint_consensus(
+        &mut self,
+        new_configuration: ClusterConfig,
+    ) -> Result<(), ProposeErr<T>> {
+        match new_configuration.validate() {
+            Err(config_error) => Err(ProposeErr::ConfigError(
+                config_error,
+                new_configuration,
+                None,
+            )),
+            Ok(_) => self
+                .seq_paxos
+                .reconfigure_joint_consensus(new_configuration),
+        }
+    }
+
+    /// Return the cluster's current configuration.
+    pub fn get_config(&self) -> QuorumConfig {
+        self.seq_paxos.internal_storage.get_quorum_config()
     }
 
     /// Handles re-establishing a connection to a previously disconnected peer.

@@ -1,4 +1,4 @@
-use crate::storage::{QuorumConfig, ConfigLog};
+use crate::storage::{ConfigLog, QuorumConfig};
 
 use super::{
     ballot_leader_election::Ballot,
@@ -22,8 +22,6 @@ where
     pub suffix: Vec<T>,
     /// The index of the log where the entries from `suffix` should be applied at (also the compacted idx of `decided_snapshot` if it exists).
     pub sync_idx: usize,
-    /// The entry of the current configuration.
-    pub config_entry: ConfigLog,
     /// The accepted StopSign.
     pub stopsign: Option<StopSign>,
 }
@@ -87,6 +85,7 @@ where
     pub config_accepted_indexes: Vec<usize>,
     max_promise_meta: PromiseMetaData,
     max_promise_sync: Option<LogSync<T>>,
+    max_promise_config: Option<(Ballot, ConfigLog)>,
     batch_accept_meta: Vec<Option<(Ballot, usize)>>, //  index in outgoing
     pub max_pid: usize,
 }
@@ -104,6 +103,7 @@ where
             config_accepted_indexes: vec![0; max_pid],
             max_promise_meta: PromiseMetaData::default(),
             max_promise_sync: None,
+            max_promise_config: None,
             batch_accept_meta: vec![None; max_pid],
             max_pid,
         }
@@ -138,9 +138,15 @@ where
             decided_idx: prom.decided_idx,
             pid: from,
         };
-        if check_max_prom && promise_meta > self.max_promise_meta {
-            self.max_promise_meta = promise_meta.clone();
-            self.max_promise_sync = prom.log_sync;
+        if check_max_prom {
+            if promise_meta > self.max_promise_meta {
+                self.max_promise_meta = promise_meta.clone();
+                self.max_promise_sync = prom.log_sync;
+            }
+            let promise_config = Some((prom.n_accepted, prom.config_log));
+            if promise_config > self.max_promise_config {
+                self.max_promise_config = promise_config;
+            }
         }
         self.promises_meta[Self::pid_to_idx(from)] = PromiseState::Promised(promise_meta);
         self.promises_meta
@@ -162,8 +168,8 @@ where
         std::mem::take(&mut self.max_promise_sync)
     }
 
-    pub fn get_max_promise_sync(&self) -> &Option<LogSync<T>> {
-        &self.max_promise_sync
+    pub fn get_max_promise_config(&mut self) -> Option<ConfigLog> {
+        self.max_promise_config.map(|(_, config)| config)
     }
 
     pub fn get_max_promise_meta(&self) -> &PromiseMetaData {
@@ -277,7 +283,7 @@ where
 
 /// The entry read in the log.
 #[derive(Debug, Clone)]
-pub enum EntryRead<T: Entry> {
+pub enum LogEntry<T: Entry> {
     /// The entry is decided.
     Decided(T),
     /// The entry is NOT decided. Might be removed from the log at a later time.
@@ -295,17 +301,17 @@ pub enum EntryRead<T: Entry> {
     StopSign(StopSign, bool),
 }
 
-impl<T: PartialEq + Entry> PartialEq for EntryRead<T>
+impl<T: PartialEq + Entry> PartialEq for LogEntry<T>
 where
     <T as Entry>::Snapshot: PartialEq,
 {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (EntryRead::Decided(v1), EntryRead::Decided(v2)) => v1 == v2,
-            (EntryRead::Undecided(v1), EntryRead::Undecided(v2)) => v1 == v2,
-            (EntryRead::Trimmed(idx1), EntryRead::Trimmed(idx2)) => idx1 == idx2,
-            (EntryRead::Snapshotted(s1), EntryRead::Snapshotted(s2)) => s1 == s2,
-            (EntryRead::StopSign(ss1, b1), EntryRead::StopSign(ss2, b2)) => ss1 == ss2 && b1 == b2,
+            (LogEntry::Decided(v1), LogEntry::Decided(v2)) => v1 == v2,
+            (LogEntry::Undecided(v1), LogEntry::Undecided(v2)) => v1 == v2,
+            (LogEntry::Trimmed(idx1), LogEntry::Trimmed(idx2)) => idx1 == idx2,
+            (LogEntry::Snapshotted(s1), LogEntry::Snapshotted(s2)) => s1 == s2,
+            (LogEntry::StopSign(ss1, b1), LogEntry::StopSign(ss2, b2)) => ss1 == ss2 && b1 == b2,
             _ => false,
         }
     }
@@ -445,6 +451,8 @@ pub struct FlexibleQuorum {
 #[derive(Copy, Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Quorum {
+    /// The total number of nodes in the cluster.
+    pub cluster_size: usize,
     /// The number of nodes a leader needs to consult to get an up-to-date view of the log.
     pub read_quorum_size: usize,
     /// The number of acknowledgments a leader needs to commit an entry to the log
@@ -458,6 +466,7 @@ impl Quorum {
     ) -> Self {
         match flexible_quorum_config {
             None => Quorum {
+                cluster_size,
                 read_quorum_size: cluster_size / 2 + 1,
                 write_quorum_size: cluster_size / 2 + 1,
             },
@@ -465,6 +474,7 @@ impl Quorum {
                 read_quorum_size,
                 write_quorum_size,
             }) => Quorum {
+                cluster_size,
                 read_quorum_size,
                 write_quorum_size,
             },
@@ -477,6 +487,14 @@ impl Quorum {
 
     pub(crate) fn is_accept_quorum(&self, num_nodes: usize) -> bool {
         num_nodes >= self.write_quorum_size
+    }
+
+    pub(crate) fn get_overlapping_read_quorum(&self) -> usize {
+        self.cluster_size - self.write_quorum_size + 1
+    }
+
+    pub(crate) fn get_overlapping_write_quorum(&self) -> usize {
+        self.cluster_size - self.read_quorum_size + 1
     }
 }
 

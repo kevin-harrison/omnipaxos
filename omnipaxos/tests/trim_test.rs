@@ -2,7 +2,7 @@ pub mod utils;
 
 use crate::utils::omnireplica::OmniPaxosComponent;
 use kompact::prelude::{promise, Ask, Component, FutureCollection};
-use omnipaxos::util::EntryRead;
+use omnipaxos::util::LogEntry;
 use serial_test::serial;
 use std::{sync::Arc, thread};
 use utils::{TestConfig, TestSystem, Value};
@@ -143,7 +143,7 @@ fn check_trim(
         let op = &x.paxos;
         for trimmed_idx in 0..trim_idx {
             match op.read(trimmed_idx).unwrap() {
-                EntryRead::Trimmed(idx) if idx == trim_idx => {}
+                LogEntry::Trimmed(idx) if idx == trim_idx => {}
                 e => panic!(
                     "Entry {} must be Trimmed({}), but was {:?}",
                     trimmed_idx, trim_idx, e
@@ -153,7 +153,7 @@ fn check_trim(
         for idx in trim_idx..num_proposals {
             let expected_value = vec_proposals.get(idx).unwrap();
             match op.read(idx).unwrap() {
-                EntryRead::Decided(v) if &v == expected_value => {}
+                LogEntry::Decided(v) if &v == expected_value => {}
                 e => panic!(
                     "Entry must be decided with {:?} at idx {}, but was {:?}",
                     expected_value, idx, e

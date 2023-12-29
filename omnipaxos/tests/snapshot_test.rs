@@ -2,7 +2,7 @@ pub mod utils;
 
 use crate::utils::{omnireplica::OmniPaxosComponent, ValueSnapshot};
 use kompact::prelude::{promise, Ask, Component, FutureCollection};
-use omnipaxos::{storage::Snapshot, util::EntryRead};
+use omnipaxos::{storage::Snapshot, util::LogEntry};
 use serial_test::serial;
 use std::{sync::Arc, thread};
 use utils::{TestConfig, TestSystem, Value};
@@ -136,7 +136,7 @@ fn check_snapshot(
         let op = &x.paxos;
         for snapshotted_idx in 0..snapshot_idx {
             match op.read(snapshotted_idx).unwrap() {
-                EntryRead::Snapshotted(s)
+                LogEntry::Snapshotted(s)
                     if s.snapshot == exp_snapshot && s.trimmed_idx == snapshot_idx => {}
                 e => panic!(
                     "Unexpected entry at {}. Should be snapshot with trimmed index {} and latest value: {:?}, but got {:?}",
@@ -147,7 +147,7 @@ fn check_snapshot(
         for idx in snapshot_idx..num_proposals {
             let expected_value = vec_proposals.get(idx).unwrap();
             match op.read(idx).unwrap() {
-                EntryRead::Decided(v) if &v == expected_value => {}
+                LogEntry::Decided(v) if &v == expected_value => {}
                 e => panic!(
                     "Entry {} must be decided with {:?}, but was {:?}",
                     idx, expected_value, e

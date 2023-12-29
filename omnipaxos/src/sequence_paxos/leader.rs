@@ -35,6 +35,7 @@ where
                 decided_idx,
                 accepted_idx,
                 log_sync: None,
+                config_log: self.internal_storage.get_config_log(),
             };
             self.leader_state.set_promise(my_promise, self.pid, true);
             /* initialise longest chosen sequence and update state */
@@ -136,20 +137,14 @@ where
     }
 
     pub(crate) fn accept_quorum_config_leader(&mut self, quorum_config: QuorumConfig) {
-        let accepted_metadata = self
+        let config_accepted_idx = self
             .internal_storage
-            .flush_and_append_quorum_config(quorum_config)
+            .append_quorum_config(quorum_config)
             .expect(WRITE_ERROR_MSG);
-        if let Some(metadata) = accepted_metadata {
-            self.leader_state.set_accepted_idx(self.pid, metadata.accepted_idx);
-            self.send_acceptdecide(metadata);
-        }
-        // TODO: if we get a new quorum that makes it so we don't have enough promises we need to go
-        // back into prepare phase?
         // TODO: do we to revisit prev entries to check if they are now decided in the new quorum
         // definition? Maybe on syncing we would have to?
-        let config_idx = self.internal_storage.get_config_accepted_idx();
-        self.leader_state.set_config_accepted_idx(self.pid, config_idx);
+        self.leader_state
+            .set_config_accepted_idx(self.pid, config_accepted_idx);
         self.send_accept_quorum_config(quorum_config);
     }
 
@@ -202,6 +197,7 @@ where
             log_sync,
             #[cfg(feature = "unicache")]
             unicache: self.internal_storage.get_unicache(),
+            config_log: self.internal_storage.get_config_log(),
         };
         let msg = PaxosMessage {
             from: self.pid,
@@ -252,10 +248,6 @@ where
 
     fn send_accept_quorum_config(&mut self, quorum_config: QuorumConfig) {
         for pid in self.leader_state.get_promised_followers() {
-            // TODO: might be able to remove this and keep safety since config log is separate now
-            // Reset message batching since quorum config isn't batched with entries but must still
-            // retain its order among the entries.
-            self.leader_state.set_batch_accept_meta(pid, None);
             let acc_qc = PaxosMsg::AcceptConfig(AcceptConfig {
                 seq_num: self.leader_state.next_seq_num(pid),
                 n: self.leader_state.n_leader,
@@ -303,13 +295,37 @@ where
         });
     }
 
+    // TODO: add resend funcionality
+    pub(crate) fn send_decide_config(&mut self, decided_idx: usize) {
+        for pid in self.leader_state.get_promised_followers() {
+            let acc_qc = PaxosMsg::DecideConfig(DecideConfig {
+                seq_num: self.leader_state.next_seq_num(pid),
+                n: self.leader_state.n_leader,
+                decided_idx,
+            });
+            self.outgoing.push(PaxosMessage {
+                from: self.pid,
+                to: pid,
+                msg: acc_qc,
+            });
+        }
+    }
+
     fn handle_majority_promises(&mut self) {
         let max_promise_sync = self.leader_state.take_max_promise_sync();
-        // TODO: is this ok for decided idx when quorums are now changing?
         let decided_idx = self.leader_state.get_max_decided_idx();
-        let mut new_accepted_idx = self
+        let max_promise_config = self
+            .leader_state
+            .get_max_promise_config()
+            .expect("Exiting prepare phase without any promises.");
+        let (mut new_accepted_idx, mut new_config_accepted_idx) = self
             .internal_storage
-            .sync_log(self.leader_state.n_leader, decided_idx, max_promise_sync)
+            .sync_logs(
+                self.leader_state.n_leader,
+                decided_idx,
+                max_promise_sync,
+                max_promise_config,
+            )
             .expect(WRITE_ERROR_MSG);
         if !self.pending_stopsign() {
             if !self.buffered_proposals.is_empty() {
@@ -321,10 +337,10 @@ where
             }
             if !self.pending_quorum_reconfig() {
                 if let Some(config) = self.buffered_reconfig.take() {
-                    self.internal_storage
+                    new_config_accepted_idx = self
+                        .internal_storage
                         .append_quorum_config(self.create_next_quorum(config))
                         .expect(WRITE_ERROR_MSG);
-                    new_accepted_idx = self.internal_storage.get_accepted_idx();
                 }
             }
             if let Some(ss) = self.buffered_stopsign.take() {
@@ -337,6 +353,8 @@ where
         self.state = (Role::Leader, Phase::Accept);
         self.leader_state
             .set_accepted_idx(self.pid, new_accepted_idx);
+        self.leader_state
+            .set_config_accepted_idx(self.pid, new_config_accepted_idx);
         for pid in self.leader_state.get_promised_followers() {
             self.send_accsync(pid);
         }
@@ -355,16 +373,19 @@ where
                 .get_quorum()
                 .is_prepare_quorum(promised_nodes)
             {
-                // TODO: Revisit quorum overlaps in recovery to see if this is necessary
-                // if let Some(sync) = self.leader_state.get_max_promise_sync() {
-                //     let next_quorum = sync.quorum_config.get_active_quorum();
-                //     if !next_quorum.is_prepare_quorum(promised_nodes) {
-                //         // TODO: is this ok? quorum is out of sync with quorum_config
-                //         self.internal_storage.set_quorum(next_quorum);
-                //         return;
-                //     }
-                // }
-                self.handle_majority_promises();
+                let max_promise_config = self
+                    .leader_state
+                    .get_max_promise_config()
+                    .expect("Exiting prepare phase without any promises.");
+                // TODO: review why we dont need to wait for the max prepare quorum of the config
+                // entries we discover and instead can just rely on the most up-to-date one.
+                if max_promise_config
+                    .config
+                    .get_active_quorum()
+                    .is_prepare_quorum(promised_nodes)
+                {
+                    self.handle_majority_promises();
+                }
             }
         }
     }
@@ -397,63 +418,51 @@ where
         if accepted.n != self.leader_state.n_leader || self.state != (Role::Leader, Phase::Accept) {
             return;
         }
-        self.leader_state.set_accepted_idx(from, accepted.accepted_idx);
+        self.leader_state
+            .set_accepted_idx(from, accepted.accepted_idx);
         let quorum = self.internal_storage.get_quorum();
         if accepted.accepted_idx > self.internal_storage.get_decided_idx()
             && self.leader_state.is_chosen(accepted.accepted_idx, quorum)
-            {
-                let new_decided_idx = accepted.accepted_idx;
-                self.internal_storage
-                    .set_decided_idx(new_decided_idx)
-                    .expect(WRITE_ERROR_MSG);
-                for pid in self.leader_state.get_promised_followers() {
-                    match self.leader_state.get_batch_accept_meta(pid) {
-                        Some((bal, msg_idx)) if bal == self.leader_state.n_leader => {
-                            let PaxosMessage { msg, .. } = self.outgoing.get_mut(msg_idx).unwrap();
-                            match msg {
-                                PaxosMsg::AcceptDecide(acc) => acc.decided_idx = new_decided_idx,
-                                _ => panic!("Cached index is not an AcceptDecide!"),
-                            }
+        {
+            let new_decided_idx = accepted.accepted_idx;
+            self.internal_storage
+                .set_decided_idx(new_decided_idx)
+                .expect(WRITE_ERROR_MSG);
+            for pid in self.leader_state.get_promised_followers() {
+                match self.leader_state.get_batch_accept_meta(pid) {
+                    Some((bal, msg_idx)) if bal == self.leader_state.n_leader => {
+                        let PaxosMessage { msg, .. } = self.outgoing.get_mut(msg_idx).unwrap();
+                        match msg {
+                            PaxosMsg::AcceptDecide(acc) => acc.decided_idx = new_decided_idx,
+                            _ => panic!("Cached index is not an AcceptDecide!"),
                         }
-                        _ => self.send_decide(pid, new_decided_idx, false),
-                    };
-                }
+                    }
+                    _ => self.send_decide(pid, new_decided_idx, false),
+                };
             }
+        }
     }
 
     pub(crate) fn handle_accepted_config(&mut self, acc_config: AcceptedConfig, from: NodeId) {
-        if acc_config.n != self.leader_state.n_leader || self.state != (Role::Leader, Phase::Accept) {
+        if acc_config.n != self.leader_state.n_leader || self.state != (Role::Leader, Phase::Accept)
+        {
             return;
         }
-        self.leader_state.set_config_accepted_idx(from, acc_config.accepted_idx);
+        self.leader_state
+            .set_config_accepted_idx(from, acc_config.accepted_idx);
         let quorum = self.internal_storage.get_quorum();
-        if acc_config.accepted_idx > self.internal_storage.get_config_decided_idx() 
-            && self.leader_state.is_config_chosen(acc_config.accepted_idx, quorum) {
-                let new_decided_idx = acc_config.accepted_idx;
-                self.internal_storage
-                    .set_config_decided_idx(new_decided_idx)
-                    .expect(WRITE_ERROR_MSG);
-                for pid in self.leader_state.get_promised_followers() {
-                    // TODO: might be able to remove this line and keep safety
-                    self.leader_state.set_batch_accept_meta(pid, None);
-                    let acc_qc = PaxosMsg::DecideConfig(DecideConfig {
-                            seq_num: self.leader_state.next_seq_num(pid),
-                            n: self.leader_state.n_leader,
-                            decided_idx: new_decided_idx,
-                        });
-                    self.outgoing.push(PaxosMessage {
-                        from: self.pid,
-                        to: pid,
-                        msg: acc_qc,
-                    });
-                }
-                let current_quorum_config = self.internal_storage.get_quorum_config();
-                if let QuorumConfig::Transitional(_, qc) = current_quorum_config {
-                    if self.internal_storage.config_is_decided() {
-                        self.accept_quorum_config_leader(QuorumConfig::Stable(qc));
-                    }
-                }
-            }
+        if acc_config.accepted_idx > self.internal_storage.get_config_decided_idx()
+            && self
+                .leader_state
+                .is_config_chosen(acc_config.accepted_idx, quorum)
+        {
+            let new_decided_idx = acc_config.accepted_idx;
+            self.internal_storage
+                .set_config_decided_idx(new_decided_idx)
+                .expect(WRITE_ERROR_MSG);
+            self.send_decide_config(new_decided_idx);
+            self.handle_decided_transition_config();
+        }
     }
 
     pub(crate) fn handle_notaccepted(&mut self, not_acc: NotAccepted, from: NodeId) {
@@ -505,6 +514,15 @@ where
             self.leader_state
                 .set_accepted_idx(self.pid, metadata.accepted_idx);
             self.send_acceptdecide(metadata);
+        }
+    }
+
+    fn handle_decided_transition_config(&mut self) {
+        let current_quorum_config = self.internal_storage.get_quorum_config();
+        if let QuorumConfig::Transitional(_, qc) = current_quorum_config {
+            if self.internal_storage.config_is_decided() {
+                self.accept_quorum_config_leader(QuorumConfig::Stable(qc));
+            }
         }
     }
 }

@@ -11,7 +11,7 @@ mod docs_integration_test {
     #![cfg(feature = "toml_config")]
 
     use omnipaxos::{
-        messages::Message, storage::Snapshot, util::EntryRead, ClusterConfig, OmniPaxos,
+        messages::Message, storage::Snapshot, util::LogEntry, ClusterConfig, OmniPaxos,
         OmniPaxosConfig, ServerConfig,
     };
     use omnipaxos_storage::{

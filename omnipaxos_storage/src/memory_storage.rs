@@ -1,6 +1,6 @@
 use omnipaxos::{
     ballot_leader_election::Ballot,
-    storage::{Entry, LogEntry, QuorumConfig, StopSign, Storage, StorageOp, StorageResult},
+    storage::{ConfigLog, Entry, StopSign, Storage, StorageOp, StorageResult},
 };
 /// An in-memory storage implementation for SequencePaxos.
 #[derive(Clone)]
@@ -9,7 +9,7 @@ where
     T: Entry,
 {
     /// Vector which contains all the logged entries in-memory.
-    log: Vec<LogEntry<T>>,
+    log: Vec<T>,
     /// Last promised round.
     n_prom: Option<Ballot>,
     /// Last accepted round.
@@ -22,10 +22,8 @@ where
     compacted_idx: usize,
     /// Stored snapshot
     snapshot: Option<T::Snapshot>,
-    /// Stored quorum config
-    quorum_config: Option<QuorumConfig>,
-    /// Index of quorum config entry
-    quorum_config_idx: Option<usize>,
+    /// Stored config log
+    config_log: Option<ConfigLog>,
     /// Stored StopSign
     stopsign: Option<StopSign>,
 }
@@ -47,7 +45,7 @@ where
                 StorageOp::SetAcceptedRound(bal) => self.set_accepted_round(bal)?,
                 StorageOp::SetCompactedIdx(idx) => self.set_compacted_idx(idx)?,
                 StorageOp::Trim(idx) => self.trim(idx)?,
-                StorageOp::SetQuorumConfig(qc, idx) => self.set_quorum_config(qc, idx)?,
+                StorageOp::SetConfig(conf) => self.set_config(conf)?,
                 StorageOp::SetStopsign(ss) => self.set_stopsign(ss)?,
                 StorageOp::SetSnapshot(snap) => self.set_snapshot(snap)?,
             }
@@ -55,22 +53,18 @@ where
         Ok(())
     }
 
-    fn append_entry(&mut self, entry: LogEntry<T>) -> StorageResult<()> {
+    fn append_entry(&mut self, entry: T) -> StorageResult<()> {
         self.log.push(entry);
         Ok(())
     }
 
-    fn append_entries(&mut self, entries: Vec<LogEntry<T>>) -> StorageResult<()> {
+    fn append_entries(&mut self, entries: Vec<T>) -> StorageResult<()> {
         let mut e = entries;
         self.log.append(&mut e);
         Ok(())
     }
 
-    fn append_on_prefix(
-        &mut self,
-        from_idx: usize,
-        entries: Vec<LogEntry<T>>,
-    ) -> StorageResult<()> {
+    fn append_on_prefix(&mut self, from_idx: usize, entries: Vec<T>) -> StorageResult<()> {
         self.log.truncate(from_idx - self.trimmed_idx);
         self.append_entries(entries)
     }
@@ -98,7 +92,7 @@ where
         Ok(self.acc_round)
     }
 
-    fn get_entries(&self, from: usize, to: usize) -> StorageResult<Vec<LogEntry<T>>> {
+    fn get_entries(&self, from: usize, to: usize) -> StorageResult<Vec<T>> {
         let from = from - self.trimmed_idx;
         let to = to - self.trimmed_idx;
         Ok(self.log.get(from..to).unwrap_or(&[]).to_vec())
@@ -108,7 +102,7 @@ where
         Ok(self.log.len())
     }
 
-    fn get_suffix(&self, from: usize) -> StorageResult<Vec<LogEntry<T>>> {
+    fn get_suffix(&self, from: usize) -> StorageResult<Vec<T>> {
         Ok(match self.log.get((from - self.trimmed_idx)..) {
             Some(s) => s.to_vec(),
             None => vec![],
@@ -119,17 +113,13 @@ where
         Ok(self.n_prom)
     }
 
-    fn set_quorum_config(&mut self, config: QuorumConfig, idx: usize) -> StorageResult<()> {
-        self.quorum_config = Some(config);
-        self.quorum_config_idx = Some(idx);
+    fn set_config(&mut self, config: ConfigLog) -> StorageResult<()> {
+        self.config_log = Some(config);
         Ok(())
     }
 
-    fn get_quorum_config(&self) -> StorageResult<Option<(QuorumConfig, usize)>> {
-        match (self.quorum_config, self.quorum_config_idx) {
-            (Some(config), Some(idx)) => Ok(Some((config, idx))),
-            _ => Ok(None),
-        }
+    fn get_config(&self) -> StorageResult<Option<ConfigLog>> {
+        Ok(self.config_log)
     }
 
     fn set_stopsign(&mut self, s: Option<StopSign>) -> StorageResult<()> {
@@ -176,8 +166,7 @@ impl<T: Entry> Default for MemoryStorage<T> {
             ld: 0,
             trimmed_idx: 0,
             compacted_idx: 0,
-            quorum_config: None,
-            quorum_config_idx: None,
+            config_log: None,
             snapshot: None,
             stopsign: None,
         }

@@ -40,6 +40,7 @@ where
                 decided_idx: self.internal_storage.get_decided_idx(),
                 accepted_idx,
                 log_sync,
+                config_log: self.internal_storage.get_config_log(),
             };
             self.cached_promise_message = Some(promise.clone());
             self.outgoing.push(PaxosMessage {
@@ -52,9 +53,14 @@ where
 
     pub(crate) fn handle_acceptsync(&mut self, accsync: AcceptSync<T>, from: NodeId) {
         if self.check_valid_ballot(accsync.n) && self.state == (Role::Follower, Phase::Prepare) {
-            let new_accepted_idx = self
+            let (new_accepted_idx, new_config_accepted_idx) = self
                 .internal_storage
-                .sync_log(accsync.n, accsync.decided_idx, Some(accsync.log_sync))
+                .sync_logs(
+                    accsync.n,
+                    accsync.decided_idx,
+                    Some(accsync.log_sync),
+                    accsync.config_log,
+                )
                 .expect(WRITE_ERROR_MSG);
             if self.internal_storage.get_stopsign().is_none() {
                 // TODO: forward buffered reconfig
@@ -73,6 +79,7 @@ where
                 to: from,
                 msg: PaxosMsg::Accepted(accepted),
             });
+            self.reply_accepted_config(accsync.n, new_config_accepted_idx);
             #[cfg(feature = "unicache")]
             self.internal_storage.set_unicache(accsync.unicache);
         }
@@ -114,13 +121,6 @@ where
             && self.state == (Role::Follower, Phase::Accept)
             && self.handle_sequence_num(acc_qc.seq_num, acc_qc.n.pid) == MessageStatus::Expected
         {
-            // Flush entries before appending the quorum config. The accepted index is ignored here as
-            // it will be updated when appending the quorum config.
-            let accepted_idx = self.internal_storage.get_accepted_idx();
-            let new_accepted_idx = self.internal_storage.flush_batch().expect(WRITE_ERROR_MSG);
-            if new_accepted_idx > accepted_idx {
-                self.reply_accepted(acc_qc.n, new_accepted_idx);
-            }
             // NOTE: Need to update quorum here because BLE needs to know current quorum in order to
             // function correctly
             let config_accepted_idx = self
@@ -162,9 +162,12 @@ where
     pub(crate) fn handle_decide_config(&mut self, dec_config: DecideConfig) {
         if self.check_valid_ballot(dec_config.n)
             && self.state.1 == Phase::Accept
-            && self.handle_sequence_num(dec_config.seq_num, dec_config.n.pid) == MessageStatus::Expected
+            && self.handle_sequence_num(dec_config.seq_num, dec_config.n.pid)
+                == MessageStatus::Expected
         {
-            self.internal_storage.set_config_decided_idx(dec_config.decided_idx).expect(WRITE_ERROR_MSG);
+            self.internal_storage
+                .set_config_decided_idx(dec_config.decided_idx)
+                .expect(WRITE_ERROR_MSG);
         }
     }
 
@@ -213,10 +216,6 @@ where
     }
 
     fn reply_accepted_config(&mut self, n: Ballot, accepted_idx: usize) {
-        // TODO: might be able to remove this and keep safety since config log is separate now
-        // Reset message batching since quorum config isn't batched with entries but must still
-        // retain its order among the entries.
-        self.latest_accepted_meta = None;
         let accepted = AcceptedConfig { n, accepted_idx };
         self.outgoing.push(PaxosMessage {
             from: self.pid,

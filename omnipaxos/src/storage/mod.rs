@@ -7,7 +7,7 @@ use crate::unicache::*;
 use crate::{util::Quorum, ClusterConfig};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
-use std::{error::Error, fmt::Debug};
+use std::{cmp::Ordering, error::Error, fmt::Debug};
 
 /// Type of the entries stored in the log.
 pub trait Entry: Clone + Debug {
@@ -55,7 +55,15 @@ pub struct ConfigLog {
     /// The accepted index of the config log.
     pub accepted_idx: usize,
     /// The decided index of the config log.
-    pub decided_idx: usize
+    pub decided_idx: usize,
+}
+
+impl PartialOrd for ConfigLog {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        let ordering =
+            (self.accepted_idx, self.decided_idx).cmp(&(other.accepted_idx, other.decided_idx));
+        Some(ordering)
+    }
 }
 
 /// The current quorum of the configuration.
@@ -176,8 +184,7 @@ where
     fn append_entries(&mut self, entries: Vec<T>) -> StorageResult<()>;
 
     /// Appends the entries of `entries` to the prefix from index `from_index` (inclusive) in the log.
-    fn append_on_prefix(&mut self, from_idx: usize, entries: Vec<T>)
-        -> StorageResult<()>;
+    fn append_on_prefix(&mut self, from_idx: usize, entries: Vec<T>) -> StorageResult<()>;
 
     /// Sets the round that has been promised.
     fn set_promise(&mut self, n_prom: Ballot) -> StorageResult<()>;

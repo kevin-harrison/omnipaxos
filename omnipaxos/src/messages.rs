@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 pub mod sequence_paxos {
     use crate::{
         ballot_leader_election::Ballot,
-        storage::{Entry, QuorumConfig, StopSign},
+        storage::{ConfigLog, Entry, QuorumConfig, StopSign},
         util::{LogSync, NodeId, SequenceNumber},
         ClusterConfig,
     };
@@ -58,6 +58,8 @@ pub mod sequence_paxos {
         /// The log update which the leader applies to its log in order to sync
         /// with this follower (if the follower is more up-to-date).
         pub log_sync: Option<LogSync<T>>,
+        /// The config log of this follower.
+        pub config_log: ConfigLog,
     }
 
     /// AcceptSync message sent by the leader to synchronize the logs of all replicas in the prepare phase.
@@ -79,6 +81,8 @@ pub mod sequence_paxos {
         #[cfg(feature = "unicache")]
         /// The UniCache of the leader
         pub unicache: T::UniCache,
+        /// The config log of the leader.
+        pub config_log: ConfigLog,
     }
 
     /// Message with entries to be replicated and the latest decided index sent by the leader in the accept phase.

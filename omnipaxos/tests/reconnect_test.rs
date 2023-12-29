@@ -5,7 +5,7 @@ use kompact::prelude::{promise, Ask};
 use omnipaxos::{
     messages::{sequence_paxos::PaxosMsg, Message},
     storage::StopSign,
-    util::{EntryRead, NodeId, SequenceNumber},
+    util::{LogEntry, NodeId, SequenceNumber},
     ClusterConfig,
 };
 use serial_test::serial;
@@ -132,7 +132,7 @@ fn reconnect_after_dropped_accepts_test() {
     thread::sleep(SLEEP_TIMEOUT);
 
     // Verify log
-    let followers_log: Vec<EntryRead<Value>> = follower.on_definition(|x| x.read_decided_log());
+    let followers_log: Vec<LogEntry<Value>> = follower.on_definition(|x| x.read_decided_log());
     verify_log(followers_log, expected_log);
 
     // Shutdown system
@@ -208,7 +208,7 @@ fn reconnect_after_dropped_prepare_test() {
     }
     thread::sleep(SLEEP_TIMEOUT);
 
-    let followers_log: Vec<EntryRead<Value>> = follower.on_definition(|x| x.read_decided_log());
+    let followers_log: Vec<LogEntry<Value>> = follower.on_definition(|x| x.read_decided_log());
     verify_log(followers_log, expected_log);
 
     // Shutdown system
@@ -290,7 +290,7 @@ fn reconnect_after_dropped_promise_test() {
     thread::sleep(SLEEP_TIMEOUT);
 
     // Verify log
-    let followers_log: Vec<EntryRead<Value>> = follower.on_definition(|x| x.read_decided_log());
+    let followers_log: Vec<LogEntry<Value>> = follower.on_definition(|x| x.read_decided_log());
     verify_log(followers_log, expected_log);
 
     // Shutdown system
@@ -356,7 +356,7 @@ fn reconnect_after_dropped_preparereq_test() {
     // Wait for Re-Sync with leader to finish
     thread::sleep(SLEEP_TIMEOUT);
 
-    let followers_log: Vec<EntryRead<Value>> = follower.on_definition(|x| x.read_decided_log());
+    let followers_log: Vec<LogEntry<Value>> = follower.on_definition(|x| x.read_decided_log());
     verify_log(followers_log, expected_log);
 
     // Shutdown system
@@ -413,7 +413,7 @@ fn resync_after_dropped_acceptstopsign_test() {
         .expect("Timeout for collecting future of decided proposal expired");
 
     // Verify log
-    let followers_log: Vec<EntryRead<Value>> = follower.on_definition(|x| x.read_decided_log());
+    let followers_log: Vec<LogEntry<Value>> = follower.on_definition(|x| x.read_decided_log());
     verify_stopsign(&followers_log, &StopSign::with(next_config, None));
 
     // Shutdown system
@@ -479,7 +479,7 @@ fn reconnect_after_dropped_acceptstopsign_test() {
 
     // Verify log
     let follower = sys.nodes.get(&follower_id).unwrap();
-    let followers_log: Vec<EntryRead<Value>> =
+    let followers_log: Vec<LogEntry<Value>> =
         follower.on_definition(|x| x.paxos.read_entries(0..1).expect("Cannot read log entry"));
     verify_stopsign(
         &followers_log,

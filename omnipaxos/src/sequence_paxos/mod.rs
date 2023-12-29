@@ -267,7 +267,9 @@ where
             PaxosMsg::AcceptDecide(acc) => self.handle_acceptdecide(acc),
             PaxosMsg::NotAccepted(not_acc) => self.handle_notaccepted(not_acc, m.from),
             PaxosMsg::Accepted(accepted) => self.handle_accepted(accepted, m.from),
-            PaxosMsg::AcceptedConfig(accepted_con) => self.handle_accepted_config(accepted_con, m.from),
+            PaxosMsg::AcceptedConfig(accepted_con) => {
+                self.handle_accepted_config(accepted_con, m.from)
+            }
             PaxosMsg::Decide(d) => self.handle_decide(d),
             PaxosMsg::DecideConfig(d_con) => self.handle_decide_config(d_con),
             PaxosMsg::ProposalForward(proposals) => self.handle_forwarded_proposal(proposals),
@@ -346,24 +348,34 @@ where
             return Err(ProposeErr::PendingReconfigConfig(new_config, None));
         }
         match self.state {
-           (Role::Leader, Phase::Accept) => self.accept_quorum_config_leader(self.create_next_quorum(new_config)),
-           (Role::Leader, Phase::Prepare) => self.buffered_reconfig = Some(new_config),
-           _ => self.forward_reconfig(new_config),
+            (Role::Leader, Phase::Accept) => {
+                self.accept_quorum_config_leader(self.create_next_quorum(new_config))
+            }
+            (Role::Leader, Phase::Prepare) => self.buffered_reconfig = Some(new_config),
+            _ => self.forward_reconfig(new_config),
         }
         Ok(())
     }
 
-    // TODO: documentation
     fn create_next_quorum(&self, reconfiguration: ClusterConfig) -> QuorumConfig {
         let cluster_size = self.peers.len() + 1;
         let current_quorum = self.internal_storage.get_quorum();
         let reconfigured_quorum = Quorum::with(reconfiguration.flexible_quorum, cluster_size);
-        if current_quorum.is_prepare_quorum(reconfigured_quorum.write_quorum_size) {
+        let quorum_overlap_property = current_quorum
+            .is_prepare_quorum(reconfigured_quorum.write_quorum_size)
+            && current_quorum.is_accept_quorum(reconfigured_quorum.read_quorum_size);
+        if quorum_overlap_property {
             QuorumConfig::Stable(reconfigured_quorum)
         } else {
+            let read_quorum_size = current_quorum
+                .get_overlapping_read_quorum()
+                .max(reconfigured_quorum.get_overlapping_read_quorum());
+            let write_quorum_size = current_quorum
+                .get_overlapping_write_quorum()
+                .max(reconfigured_quorum.get_overlapping_write_quorum());
             let transitional_flex_quorum = Some(FlexibleQuorum {
-                read_quorum_size: cluster_size - reconfigured_quorum.write_quorum_size + 1,
-                write_quorum_size: cluster_size - current_quorum.read_quorum_size + 1,
+                read_quorum_size,
+                write_quorum_size,
             });
             let transition_quorum = Quorum::with(transitional_flex_quorum, cluster_size);
             QuorumConfig::Transitional(transition_quorum, reconfigured_quorum)
@@ -484,8 +496,6 @@ where
             decided_snapshot,
             suffix,
             sync_idx,
-            quorum_config: self.internal_storage.get_quorum_config(),
-            quorum_config_idx: self.internal_storage.get_quorum_config_idx(),
             stopsign: self.internal_storage.get_stopsign(),
         }
     }
