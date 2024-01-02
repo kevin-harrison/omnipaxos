@@ -27,11 +27,16 @@ where
 }
 
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 /// Promise without the log update
-pub(crate) struct PromiseMetaData {
+pub struct PromiseMetaData {
+    /// Last accepted round of the promiser.
     pub n_accepted: Ballot,
+    /// Accepted index of the promiser.
     pub accepted_idx: usize,
+    /// Decided index of the promiser.
     pub decided_idx: usize,
+    /// Pid of the promiser.
     pub pid: NodeId,
 }
 
@@ -62,6 +67,7 @@ impl PartialEq for PromiseMetaData {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 /// The promise state of a node.
 enum PromiseState {
     /// Not promised to any leader
@@ -72,11 +78,17 @@ enum PromiseState {
     PromisedHigher,
 }
 
+/// The leadership-state of this node.
+#[allow(missing_docs)]
 #[derive(Debug, Clone)]
-pub(crate) struct LeaderState<T>
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct LeaderState<T>
 where
     T: Entry,
 {
+    /// Process identifier used to uniquely identify this node.
+    pub pid: NodeId,
+    /// The ballot associated with this node's leadership.
     pub n_leader: Ballot,
     promises_meta: Vec<PromiseState>,
     // the sequence number of accepts for each follower where AcceptSync has sequence number = 1
@@ -86,16 +98,18 @@ where
     max_promise_meta: PromiseMetaData,
     max_promise_sync: Option<LogSync<T>>,
     max_promise_config: Option<(Ballot, ConfigLog)>,
-    batch_accept_meta: Vec<Option<(Ballot, usize)>>, //  index in outgoing
+    pub batch_accept_meta: Vec<Option<(Ballot, usize)>>, //  index in outgoing
     pub max_pid: usize,
 }
 
+#[allow(missing_docs)]
 impl<T> LeaderState<T>
 where
     T: Entry,
 {
-    pub fn with(n_leader: Ballot, max_pid: usize) -> Self {
+    pub fn with(n_leader: Ballot, pid: NodeId, max_pid: usize) -> Self {
         Self {
+            pid,
             n_leader,
             promises_meta: vec![PromiseState::NotPromised; max_pid],
             follower_seq_nums: vec![SequenceNumber::default(); max_pid],
@@ -210,7 +224,7 @@ where
             .iter()
             .enumerate()
             .filter_map(|(idx, x)| match x {
-                PromiseState::Promised(_) if idx != Self::pid_to_idx(self.n_leader.pid) => {
+                PromiseState::Promised(_) if idx != Self::pid_to_idx(self.pid) => {
                     Some((idx + 1) as NodeId)
                 }
                 _ => None,

@@ -216,8 +216,8 @@ where
         self.batch_append_entries(entries)
     }
 
-    fn batch_set_promise(&mut self, n_prom: Ballot) -> StorageResult<()> {
-        let prom_bytes = bincode::serialize(&n_prom)?;
+    fn batch_set_promise(&mut self, n_prom: Ballot, leader: u64) -> StorageResult<()> {
+        let prom_bytes = bincode::serialize(&(n_prom, leader))?;
         self.write_batch.put(NPROM, prom_bytes);
         Ok(())
     }
@@ -290,7 +290,7 @@ where
                 StorageOp::AppendOnPrefix(from_idx, entries) => {
                     self.batch_append_on_prefix(from_idx, entries)?
                 }
-                StorageOp::SetPromise(bal) => self.batch_set_promise(bal)?,
+                StorageOp::SetPromise(bal, leader) => self.batch_set_promise(bal, leader)?,
                 StorageOp::SetDecidedIndex(idx) => self.batch_set_decided_idx(idx)?,
                 StorageOp::SetAcceptedRound(bal) => self.batch_set_accepted_round(bal)?,
                 StorageOp::SetCompactedIdx(idx) => self.batch_set_compacted_idx(idx)?,
@@ -366,7 +366,7 @@ where
         self.get_entries(from, self.next_log_key)
     }
 
-    fn get_promise(&self) -> StorageResult<Option<Ballot>> {
+    fn get_promise(&self) -> StorageResult<Option<(Ballot, u64)>> {
         let promise = self.db.get_pinned(NPROM)?;
         match promise {
             Some(pinned_bytes) => Ok(Some(bincode::deserialize(&pinned_bytes)?)),
@@ -374,8 +374,8 @@ where
         }
     }
 
-    fn set_promise(&mut self, n_prom: Ballot) -> StorageResult<()> {
-        let prom_bytes = bincode::serialize(&n_prom)?;
+    fn set_promise(&mut self, n_prom: Ballot, leader: u64) -> StorageResult<()> {
+        let prom_bytes = bincode::serialize(&(n_prom, leader))?;
         self.db.put(NPROM, prom_bytes)?;
         Ok(())
     }

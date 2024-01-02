@@ -2,7 +2,7 @@ use super::{state_cache::StateCache, ConfigLog, QuorumConfig};
 use crate::{
     ballot_leader_election::Ballot,
     storage::{Entry, Snapshot, SnapshotType, StopSign, Storage, StorageOp, StorageResult},
-    util::{AcceptedMetaData, IndexEntry, LogEntry, LogSync, Quorum, SnapshottedEntry},
+    util::{AcceptedMetaData, IndexEntry, LogEntry, LogSync, NodeId, Quorum, SnapshottedEntry},
     CompactionErr,
 };
 #[cfg(feature = "unicache")]
@@ -67,11 +67,13 @@ where
     }
 
     fn load_cache(&mut self) {
-        self.state_cache.promise = self
+        let (promise, leader) = self
             .storage
             .get_promise()
             .expect("Failed to load cache from storage.")
             .unwrap_or_default();
+        self.state_cache.promise = promise;
+        self.state_cache.leader = leader;
         self.state_cache.decided_idx = self.storage.get_decided_idx().unwrap();
         self.state_cache.accepted_round = self
             .storage
@@ -485,9 +487,10 @@ where
         Ok(())
     }
 
-    pub(crate) fn set_promise(&mut self, n_prom: Ballot) -> StorageResult<()> {
+    pub(crate) fn set_promise(&mut self, n_prom: Ballot, leader: NodeId) -> StorageResult<()> {
         self.state_cache.promise = n_prom;
-        self.storage.set_promise(n_prom)
+        self.state_cache.leader = leader;
+        self.storage.set_promise(n_prom, leader)
     }
 
     pub(crate) fn set_decided_idx(&mut self, idx: usize) -> StorageResult<()> {
@@ -525,6 +528,10 @@ where
 
     pub(crate) fn get_promise(&self) -> Ballot {
         self.state_cache.promise
+    }
+
+    pub(crate) fn get_leader(&self) -> NodeId {
+        self.state_cache.leader
     }
 
     pub(crate) fn set_stopsign(&mut self, ss: Option<StopSign>) -> StorageResult<usize> {

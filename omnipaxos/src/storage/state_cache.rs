@@ -1,5 +1,8 @@
 use super::{internal_storage::InternalStorageConfig, ConfigLog, Entry, StopSign};
-use crate::{ballot_leader_election::Ballot, util::Quorum};
+use crate::{
+    ballot_leader_election::Ballot,
+    util::{NodeId, Quorum},
+};
 #[cfg(feature = "unicache")]
 use crate::{unicache::*, util::NodeId};
 
@@ -17,6 +20,8 @@ where
     pub batched_entries: Vec<T>,
     /// Last promised round.
     pub promise: Ballot,
+    /// The owner of the promised ballot.
+    pub leader: NodeId,
     /// Last accepted round.
     pub accepted_round: Ballot,
     /// Length of the decided log.
@@ -53,6 +58,7 @@ where
             batch_size: config.batch_size,
             batched_entries: Vec::with_capacity(config.batch_size),
             promise: Ballot::default(),
+            leader: 0,
             accepted_round: Ballot::default(),
             decided_idx: 0,
             accepted_idx: 0,

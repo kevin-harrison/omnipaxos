@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 
 /// Ballot Leader Election algorithm for electing new leaders
 use crate::{
+    messages::ballot_leader_election::{BLEMsg, RelinquishedLeadership},
     sequence_paxos::{Phase, Role},
     util::{defaults::*, ConfigurationId, FlexibleQuorum, Quorum},
 };
@@ -9,9 +10,7 @@ use crate::{
 #[cfg(feature = "logging")]
 use crate::utils::logger::create_logger;
 use crate::{
-    messages::ballot_leader_election::{
-        BLEMessage, HeartbeatMsg, HeartbeatReply, HeartbeatRequest,
-    },
+    messages::ballot_leader_election::{BLEMessage, HeartbeatReply, HeartbeatRequest},
     util::NodeId,
     OmniPaxosConfig,
 };
@@ -30,7 +29,7 @@ pub struct Ballot {
     pub n: u32,
     /// Custom priority parameter
     pub priority: u32,
-    /// The pid of the process
+    /// The pid of the process that created this ballot.
     pub pid: NodeId,
 }
 
@@ -166,8 +165,9 @@ impl BallotLeaderElection {
     /// * `m` - the message to be handled.
     pub(crate) fn handle(&mut self, m: BLEMessage) {
         match m.msg {
-            HeartbeatMsg::Request(req) => self.handle_request(m.from, req),
-            HeartbeatMsg::Reply(rep) => self.handle_reply(rep),
+            BLEMsg::HeartbeatRequest(req) => self.handle_request(m.from, req),
+            BLEMsg::HeartbeatReply(rep) => self.handle_reply(rep),
+            BLEMsg::RelinquishedLeadership(rel) => self.handle_relinquished_leadership(rel),
         }
     }
 
@@ -188,7 +188,7 @@ impl BallotLeaderElection {
             self.outgoing.push(BLEMessage {
                 from: self.pid,
                 to: *peer,
-                msg: HeartbeatMsg::Request(hb_request),
+                msg: BLEMsg::HeartbeatRequest(hb_request),
             });
         }
     }
@@ -265,6 +265,7 @@ impl BallotLeaderElection {
                 // We increment past our leader instead of max of unhappy ballots because we
                 // assume we have already checked leader for this round so they should be equal
                 self.current_ballot.n = self.leader.n + 1;
+                self.current_ballot.pid = self.pid;
                 self.leader = self.current_ballot;
                 self.happy = true;
             }
@@ -281,7 +282,7 @@ impl BallotLeaderElection {
         self.outgoing.push(BLEMessage {
             from: self.pid,
             to: from,
-            msg: HeartbeatMsg::Reply(hb_reply),
+            msg: BLEMsg::HeartbeatReply(hb_reply),
         });
     }
 
@@ -291,12 +292,45 @@ impl BallotLeaderElection {
         }
     }
 
+    fn handle_relinquished_leadership(&mut self, rel: RelinquishedLeadership) {
+        if rel.ballot >= self.leader {
+            if rel.adopt {
+                // TODO: this messes up current_ballot.priority when node tries to take over leadership
+                self.current_ballot = rel.ballot;
+            } else {
+                self.current_ballot.n = rel.ballot.n + 1;
+                self.current_ballot.pid = self.pid;
+                self.leader = self.current_ballot;
+                self.happy = true;
+            }
+        }
+    }
+
     pub(crate) fn get_current_ballot(&self) -> Ballot {
         self.current_ballot
     }
 
     pub(crate) fn get_ballots(&self) -> Vec<HeartbeatReply> {
         self.prev_replies.clone()
+    }
+
+    pub(crate) fn relinquish_leadership(&mut self, to: NodeId, transfer_leadership: bool) {
+        if self.leader == self.current_ballot {
+            if transfer_leadership {
+                // TODO: we can get disruptions here if the other nodes see the new leader with its old
+                // ballot and this node with the recovery ballot.
+                self.current_ballot.n = RECOVERY_ROUND;
+            }
+            let rel = RelinquishedLeadership {
+                ballot: self.leader,
+                adopt: transfer_leadership,
+            };
+            self.outgoing.push(BLEMessage {
+                from: self.pid,
+                to,
+                msg: BLEMsg::RelinquishedLeadership(rel),
+            });
+        }
     }
 }
 

@@ -21,7 +21,7 @@ use omnipaxos::storage::Entry;
 use omnipaxos::unicache::UniCache;
 use omnipaxos::{
     messages::{
-        ballot_leader_election::{BLEMessage, HeartbeatMsg, HeartbeatReply},
+        ballot_leader_election::{BLEMessage, BLEMsg, HeartbeatReply},
         sequence_paxos::{AcceptSync, PaxosMessage, PaxosMsg, Prepare, Promise},
         Message,
     },
@@ -73,12 +73,18 @@ fn _setup_leader() -> (
     OmniPaxos<Value, StorageType<Value>>,
 ) {
     let (mem_storage, storage_conf, mut op) = setup_follower();
-    let mut n = mem_storage.lock().unwrap().get_promise().unwrap().unwrap();
+    let mut n = mem_storage
+        .lock()
+        .unwrap()
+        .get_promise()
+        .unwrap()
+        .unwrap()
+        .0;
     let n_old = n;
     let setup_msg = Message::<Value>::BLE(BLEMessage {
         from: 2,
         to: 1,
-        msg: HeartbeatMsg::Reply(HeartbeatReply {
+        msg: BLEMsg::HeartbeatReply(HeartbeatReply {
             round: 1,
             ballot: n_old,
             leader: n_old,
@@ -90,7 +96,7 @@ fn _setup_leader() -> (
     let setup_msg = Message::<Value>::BLE(BLEMessage {
         from: 2,
         to: 1,
-        msg: HeartbeatMsg::Reply(HeartbeatReply {
+        msg: BLEMsg::HeartbeatReply(HeartbeatReply {
             round: 2,
             ballot: n_old,
             leader: n_old,
@@ -102,7 +108,7 @@ fn _setup_leader() -> (
     let setup_msg = Message::<Value>::BLE(BLEMessage {
         from: 2,
         to: 1,
-        msg: HeartbeatMsg::Reply(HeartbeatReply {
+        msg: BLEMsg::HeartbeatReply(HeartbeatReply {
             round: 3,
             ballot: n_old,
             leader: n_old,
@@ -154,7 +160,13 @@ fn setup_follower() -> (
     OmniPaxos<Value, StorageType<Value>>,
 ) {
     let (mem_storage, storage_conf, mut op) = basic_setup();
-    let mut n = mem_storage.lock().unwrap().get_promise().unwrap().unwrap();
+    let mut n = mem_storage
+        .lock()
+        .unwrap()
+        .get_promise()
+        .unwrap()
+        .unwrap()
+        .0;
     n.config_id = 1;
     n.n += 1;
     n.pid = 2;
@@ -216,7 +228,13 @@ fn setup_follower() -> (
 fn atomic_storage_acceptsync_test() {
     fn run_single_test(fail_after_n_ops: usize) {
         let (mem_storage, storage_conf, mut op) = basic_setup();
-        let mut n = mem_storage.lock().unwrap().get_promise().unwrap().unwrap();
+        let mut n = mem_storage
+            .lock()
+            .unwrap()
+            .get_promise()
+            .unwrap()
+            .unwrap()
+            .0;
         n.n += 1;
         n.pid = 2;
         let setup_msg = Message::<Value>::SequencePaxos(PaxosMessage {
@@ -225,7 +243,13 @@ fn atomic_storage_acceptsync_test() {
             msg: PaxosMsg::Prepare(Prepare {
                 decided_idx: 0,
                 accepted_idx: 0,
-                n_accepted: mem_storage.lock().unwrap().get_promise().unwrap().unwrap(),
+                n_accepted: mem_storage
+                    .lock()
+                    .unwrap()
+                    .get_promise()
+                    .unwrap()
+                    .unwrap()
+                    .0,
                 n,
             }),
         });
@@ -293,7 +317,13 @@ fn atomic_storage_trim_test() {
             from: 2,
             to: 1,
             msg: PaxosMsg::AcceptDecide(AcceptDecide {
-                n: mem_storage.lock().unwrap().get_promise().unwrap().unwrap(),
+                n: mem_storage
+                    .lock()
+                    .unwrap()
+                    .get_promise()
+                    .unwrap()
+                    .unwrap()
+                    .0,
                 seq_num: SequenceNumber {
                     session: 1,
                     counter: 2,
@@ -357,7 +387,13 @@ fn atomic_storage_snapshot_test() {
             from: 2,
             to: 1,
             msg: PaxosMsg::AcceptDecide(AcceptDecide {
-                n: mem_storage.lock().unwrap().get_promise().unwrap().unwrap(),
+                n: mem_storage
+                    .lock()
+                    .unwrap()
+                    .get_promise()
+                    .unwrap()
+                    .unwrap()
+                    .0,
                 seq_num: SequenceNumber {
                     session: 1,
                     counter: 2,
@@ -435,7 +471,13 @@ fn atomic_storage_accept_decide_test() {
             from: 2,
             to: 1,
             msg: PaxosMsg::AcceptDecide(AcceptDecide {
-                n: mem_storage.lock().unwrap().get_promise().unwrap().unwrap(),
+                n: mem_storage
+                    .lock()
+                    .unwrap()
+                    .get_promise()
+                    .unwrap()
+                    .unwrap()
+                    .0,
                 seq_num: SequenceNumber {
                     session: 1,
                     counter: 2,
@@ -475,13 +517,19 @@ fn atomic_storage_accept_decide_test() {
 fn atomic_storage_majority_promises_test() {
     fn run_single_test(fail_after_n_ops: usize) {
         let (mem_storage, storage_conf, mut op) = setup_follower();
-        let mut n = mem_storage.lock().unwrap().get_promise().unwrap().unwrap();
+        let mut n = mem_storage
+            .lock()
+            .unwrap()
+            .get_promise()
+            .unwrap()
+            .unwrap()
+            .0;
         // Send messages to 1 such that it tries to take over leadership
         let n_old = n;
         let setup_msg = Message::<Value>::BLE(BLEMessage {
             from: 2,
             to: 1,
-            msg: HeartbeatMsg::Reply(HeartbeatReply {
+            msg: BLEMsg::HeartbeatReply(HeartbeatReply {
                 round: 1,
                 ballot: n_old,
                 leader: n_old,
@@ -493,7 +541,7 @@ fn atomic_storage_majority_promises_test() {
         let setup_msg = Message::<Value>::BLE(BLEMessage {
             from: 2,
             to: 1,
-            msg: HeartbeatMsg::Reply(HeartbeatReply {
+            msg: BLEMsg::HeartbeatReply(HeartbeatReply {
                 round: 2,
                 ballot: n_old,
                 leader: n_old,
@@ -504,7 +552,7 @@ fn atomic_storage_majority_promises_test() {
         let setup_msg = Message::<Value>::BLE(BLEMessage {
             from: 3,
             to: 1,
-            msg: HeartbeatMsg::Reply(HeartbeatReply {
+            msg: BLEMsg::HeartbeatReply(HeartbeatReply {
                 round: 2,
                 ballot: n_old,
                 leader: n_old,
@@ -520,7 +568,7 @@ fn atomic_storage_majority_promises_test() {
         let setup_msg = Message::<Value>::BLE(BLEMessage {
             from: 2,
             to: 1,
-            msg: HeartbeatMsg::Reply(HeartbeatReply {
+            msg: BLEMsg::HeartbeatReply(HeartbeatReply {
                 round: 3,
                 ballot: n_new,
                 leader: n_new,
@@ -531,7 +579,7 @@ fn atomic_storage_majority_promises_test() {
         let setup_msg = Message::<Value>::BLE(BLEMessage {
             from: 3,
             to: 1,
-            msg: HeartbeatMsg::Reply(HeartbeatReply {
+            msg: BLEMsg::HeartbeatReply(HeartbeatReply {
                 round: 3,
                 ballot: n_new,
                 leader: n_new,

@@ -15,21 +15,20 @@ fn forward_proposal_test() {
     let mut sys = TestSystem::with(cfg);
 
     let first_node = sys.nodes.get(&1).unwrap();
-    let (kprom_ble, kfuture_ble) = promise::<Ballot>();
+    let (kprom_ble, kfuture_ble) = promise::<(Ballot, NodeId)>();
     first_node.on_definition(|x| x.election_futures.push(Ask::new(kprom_ble, ())));
 
     sys.start_all_nodes();
 
-    let elected_leader = kfuture_ble
+    let (leader_promise, elected_leader) = kfuture_ble
         .wait_timeout(cfg.wait_timeout)
         .expect("No leader has been elected in the allocated time!");
-    println!("elected: {:?}", elected_leader);
+    println!("elected: {elected_leader} with ballot {leader_promise:?}");
 
     let mut proposal_node: NodeId;
     loop {
         proposal_node = rand::thread_rng().gen_range(1..=cfg.num_nodes as NodeId);
-
-        if proposal_node != elected_leader.pid {
+        if proposal_node != elected_leader {
             break;
         }
     }

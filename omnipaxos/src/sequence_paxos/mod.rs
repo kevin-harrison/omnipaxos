@@ -11,6 +11,8 @@ use crate::{
     },
     ClusterConfig, CompactionErr, OmniPaxosConfig, ProposeErr,
 };
+#[cfg(feature = "serde")]
+use serde::{Deserialize, Serialize};
 #[cfg(feature = "logging")]
 use slog::{debug, info, trace, warn, Logger};
 use std::{fmt::Debug, vec};
@@ -35,7 +37,7 @@ where
     buffered_stopsign: Option<StopSign>,
     outgoing: Vec<PaxosMessage<T>>,
     leader_state: LeaderState<T>,
-    latest_accepted_meta: Option<(Ballot, usize)>,
+    latest_accepted_meta: Option<(Ballot, NodeId, usize)>,
     // Keeps track of sequence of accepts from leader where AcceptSync = 1
     current_seq_num: SequenceNumber,
     cached_promise_message: Option<Promise<T>>,
@@ -58,24 +60,24 @@ where
         let max_peer_pid = peers.iter().max().unwrap();
         let max_pid = *std::cmp::max(max_peer_pid, &pid) as usize;
         let mut outgoing = Vec::with_capacity(config.buffer_size);
-        let (state, leader) = match storage
+        let (state, promise, leader) = match storage
             .get_promise()
             .expect("storage error while trying to read promise")
         {
             // if we recover a promise from storage then we must do failure recovery
-            Some(b) => {
+            Some((prom, leader)) => {
                 let state = (Role::Follower, Phase::Recover);
                 for peer_pid in &peers {
-                    let prepreq = PrepareReq { n: b };
+                    let prepreq = PrepareReq { n: prom };
                     outgoing.push(PaxosMessage {
                         from: pid,
                         to: *peer_pid,
                         msg: PaxosMsg::PrepareReq(prepreq),
                     });
                 }
-                (state, b)
+                (state, prom, leader)
             }
-            None => ((Role::Follower, Phase::None), Ballot::default()),
+            None => ((Role::Follower, Phase::None), Ballot::default(), 0),
         };
         let initial_quorum = Quorum::with(config.flexible_quorum, num_nodes);
         let internal_storage_config = InternalStorageConfig {
@@ -96,7 +98,7 @@ where
             buffered_reconfig: None,
             buffered_stopsign: None,
             outgoing,
-            leader_state: LeaderState::<T>::with(leader, max_pid),
+            leader_state: LeaderState::<T>::with(promise, pid, max_pid),
             latest_accepted_meta: None,
             current_seq_num: SequenceNumber::default(),
             cached_promise_message: None,
@@ -115,7 +117,7 @@ where
         };
         paxos
             .internal_storage
-            .set_promise(leader)
+            .set_promise(promise, leader)
             .expect(WRITE_ERROR_MSG);
         #[cfg(feature = "logging")]
         info!(paxos.logger, "Paxos component pid: {} created!", pid);
@@ -128,6 +130,10 @@ where
 
     pub(crate) fn get_promise(&self) -> Ballot {
         self.internal_storage.get_promise()
+    }
+
+    pub(crate) fn get_leader(&self) -> NodeId {
+        self.internal_storage.get_leader()
     }
 
     pub(crate) fn get_quorum(&self) -> Quorum {
@@ -172,7 +178,7 @@ where
                         .expect("storage error while trying to trim log")
                 })
             }
-            _ => Err(CompactionErr::NotCurrentLeader(self.get_current_leader())),
+            _ => Err(CompactionErr::NotCurrentLeader(self.get_leader())),
         }
     }
 
@@ -264,19 +270,22 @@ where
                 _ => {}
             },
             PaxosMsg::AcceptSync(acc_sync) => self.handle_acceptsync(acc_sync, m.from),
-            PaxosMsg::AcceptDecide(acc) => self.handle_acceptdecide(acc),
+            PaxosMsg::AcceptDecide(acc) => self.handle_acceptdecide(acc, m.from),
             PaxosMsg::NotAccepted(not_acc) => self.handle_notaccepted(not_acc, m.from),
             PaxosMsg::Accepted(accepted) => self.handle_accepted(accepted, m.from),
             PaxosMsg::AcceptedConfig(accepted_con) => {
                 self.handle_accepted_config(accepted_con, m.from)
             }
-            PaxosMsg::Decide(d) => self.handle_decide(d),
-            PaxosMsg::DecideConfig(d_con) => self.handle_decide_config(d_con),
+            PaxosMsg::RelinquishedLeadership(rel) => {
+                self.handle_relinquished_leadership(rel, m.from)
+            }
+            PaxosMsg::Decide(d) => self.handle_decide(d, m.from),
+            PaxosMsg::DecideConfig(d_con) => self.handle_decide_config(d_con, m.from),
             PaxosMsg::ProposalForward(proposals) => self.handle_forwarded_proposal(proposals),
             PaxosMsg::ReconfigForward(f_reconfig) => self.handle_forwarded_reconfig(f_reconfig),
             PaxosMsg::Compaction(c) => self.handle_compaction(c),
-            PaxosMsg::AcceptConfig(acc_con) => self.handle_accept_quorum_config(acc_con),
-            PaxosMsg::AcceptStopSign(acc_ss) => self.handle_accept_stopsign(acc_ss),
+            PaxosMsg::AcceptConfig(acc_con) => self.handle_accept_quorum_config(acc_con, m.from),
+            PaxosMsg::AcceptStopSign(acc_ss) => self.handle_accept_stopsign(acc_ss, m.from),
             PaxosMsg::ForwardStopSign(f_ss) => self.handle_forwarded_stopsign(f_ss),
         }
     }
@@ -382,16 +391,12 @@ where
         }
     }
 
-    fn get_current_leader(&self) -> NodeId {
-        self.get_promise().pid
-    }
-
     /// Handles re-establishing a connection to a previously disconnected peer.
     /// This should only be called if the underlying network implementation indicates that a connection has been re-established.
     pub(crate) fn reconnected(&mut self, pid: NodeId) {
         if pid == self.pid {
             return;
-        } else if pid == self.get_current_leader() {
+        } else if pid == self.get_leader() {
             self.state = (Role::Follower, Phase::Recover);
         }
         let prepreq = PrepareReq {
@@ -417,7 +422,7 @@ where
     }
 
     pub(crate) fn forward_proposals(&mut self, mut entries: Vec<T>) {
-        let leader = self.get_current_leader();
+        let leader = self.get_leader();
         if leader > 0 && self.pid != leader {
             let pf = PaxosMsg::ProposalForward(entries);
             let msg = PaxosMessage {
@@ -432,7 +437,7 @@ where
     }
 
     pub(crate) fn forward_stopsign(&mut self, ss: StopSign) {
-        let leader = self.get_current_leader();
+        let leader = self.get_leader();
         if leader > 0 && self.pid != leader {
             #[cfg(feature = "logging")]
             trace!(self.logger, "Forwarding StopSign to Leader {:?}", leader);
@@ -449,7 +454,7 @@ where
     }
 
     pub(crate) fn forward_reconfig(&mut self, new_config: ClusterConfig) {
-        let leader = self.get_current_leader();
+        let leader = self.get_leader();
         if leader > 0 && self.pid != leader {
             #[cfg(feature = "logging")]
             trace!(self.logger, "Forwarding reconfig to Leader {:?}", leader);
@@ -501,7 +506,8 @@ where
     }
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub(crate) enum Phase {
     Prepare,
     Accept,

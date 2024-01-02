@@ -291,13 +291,13 @@ where
         }
     }
 
-    fn set_promise(&mut self, n_prom: Ballot) -> StorageResult<()> {
+    fn set_promise(&mut self, n_prom: Ballot, leader: NodeId) -> StorageResult<()> {
         match self {
-            StorageType::Persistent(persist_s) => persist_s.set_promise(n_prom),
-            StorageType::Memory(mem_s) => mem_s.set_promise(n_prom),
+            StorageType::Persistent(persist_s) => persist_s.set_promise(n_prom, leader),
+            StorageType::Memory(mem_s) => mem_s.set_promise(n_prom, leader),
             StorageType::Broken(mem_s, conf) => {
                 conf.lock().unwrap().tick()?;
-                mem_s.lock().unwrap().set_promise(n_prom)
+                mem_s.lock().unwrap().set_promise(n_prom, leader)
             }
         }
     }
@@ -379,7 +379,7 @@ where
         }
     }
 
-    fn get_promise(&self) -> StorageResult<Option<Ballot>> {
+    fn get_promise(&self) -> StorageResult<Option<(Ballot, NodeId)>> {
         match self {
             StorageType::Persistent(persist_s) => persist_s.get_promise(),
             StorageType::Memory(mem_s) => mem_s.get_promise(),
@@ -666,12 +666,12 @@ impl TestSystem {
     /// wait until a leader is elected in the allocated time.
     pub fn get_next_leader(&self, node_id: NodeId, wait_timeout: Duration) -> NodeId {
         let node = self.nodes.get(&node_id).expect("No BLE component found");
-        let (kprom, kfuture) = promise::<Ballot>();
+        let (kprom, kfuture) = promise::<(Ballot, NodeId)>();
         node.on_definition(|x| x.election_futures.push(Ask::new(kprom, ())));
-        let ballot = kfuture
+        let (_, leader_pid) = kfuture
             .wait_timeout(wait_timeout)
             .expect("No leader has been elected in the allocated time!");
-        ballot.pid
+        leader_pid
     }
 
     /// Forces the cluster to elect `next_leader` as leader of the cluster. Note: This modifies
@@ -779,8 +779,9 @@ pub mod omnireplica {
         tick_timeout: Duration,
         pub paxos: OmniPaxos<Value, StorageType<Value>>,
         decided_futures: HashMap<NodeId, Ask<Value, ()>>,
-        pub election_futures: Vec<Ask<(), Ballot>>,
+        pub election_futures: Vec<Ask<(), (Ballot, NodeId)>>,
         current_leader_ballot: Ballot,
+        current_leader: NodeId,
         decided_idx: usize,
     }
 
@@ -800,9 +801,11 @@ pub mod omnireplica {
                     self.schedule_periodic(self.tick_timeout, self.tick_timeout, move |c, _| {
                         c.paxos.tick();
                         let promise = c.paxos.get_promise();
-                        if promise > c.current_leader_ballot {
+                        let leader = c.paxos.get_current_leader().unwrap_or_default();
+                        if promise > c.current_leader_ballot || leader != c.current_leader {
                             c.current_leader_ballot = promise;
-                            c.answer_election_future(promise);
+                            c.current_leader = leader;
+                            c.answer_election_future(promise, leader);
                         }
                         Handled::Ok
                     }),
@@ -837,6 +840,7 @@ pub mod omnireplica {
                 decided_futures: HashMap::new(),
                 election_futures: vec![],
                 current_leader_ballot: Ballot::default(),
+                current_leader: 0,
             }
         }
 
@@ -877,9 +881,13 @@ pub mod omnireplica {
             self.peer_disconnections.get(pid).is_none()
         }
 
-        fn answer_election_future(&mut self, l: Ballot) {
+        fn answer_election_future(&mut self, l: Ballot, l_pid: NodeId) {
             if !self.election_futures.is_empty() {
-                self.election_futures.pop().unwrap().reply(l).unwrap();
+                self.election_futures
+                    .pop()
+                    .unwrap()
+                    .reply((l, l_pid))
+                    .unwrap();
             }
         }
 

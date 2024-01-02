@@ -11,7 +11,7 @@ pub mod sequence_paxos {
     use crate::{
         ballot_leader_election::Ballot,
         storage::{ConfigLog, Entry, QuorumConfig, StopSign},
-        util::{LogSync, NodeId, SequenceNumber},
+        util::{LeaderState, LogSync, NodeId, SequenceNumber},
         ClusterConfig,
     };
     #[cfg(feature = "serde")]
@@ -192,6 +192,20 @@ pub mod sequence_paxos {
         Snapshot(Option<usize>),
     }
 
+    /// Sent from a leader to a follower in order to relinquish leadership to the follower and allow it
+    /// to skip the prepare phase.
+    #[derive(Clone, Debug)]
+    #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+    pub struct RelinquishedLeadership<T>
+    where
+        T: Entry,
+    {
+        /// The sequence number of this message in the leader-to-follower accept sequence
+        pub seq_num: SequenceNumber,
+        /// Leader state of the surrendering leader.
+        pub leader_state: LeaderState<T>,
+    }
+
     /// An enum for all the different message types.
     #[allow(missing_docs)]
     #[derive(Clone, Debug)]
@@ -219,6 +233,7 @@ pub mod sequence_paxos {
         DecideConfig(DecideConfig),
         AcceptStopSign(AcceptStopSign),
         ForwardStopSign(StopSign),
+        RelinquishedLeadership(RelinquishedLeadership<T>),
     }
 
     /// A struct for a Paxos message that also includes sender and receiver.
@@ -244,15 +259,6 @@ pub mod ballot_leader_election {
     #[cfg(feature = "serde")]
     use serde::{Deserialize, Serialize};
 
-    /// An enum for all the different BLE message types.
-    #[allow(missing_docs)]
-    #[derive(Clone, Debug)]
-    #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-    pub enum HeartbeatMsg {
-        Request(HeartbeatRequest),
-        Reply(HeartbeatReply),
-    }
-
     /// Requests a reply from all the other servers.
     #[derive(Clone, Debug)]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -275,6 +281,26 @@ pub mod ballot_leader_election {
         pub happy: bool,
     }
 
+    /// Sent by a leader who has stepped down as leader and wants another node to take over.
+    #[derive(Clone, Debug)]
+    #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+    pub struct RelinquishedLeadership {
+        /// The ballot of the stepping down leader.
+        pub ballot: Ballot,
+        /// Whether the node should adopt the previous leaders ballot or not.
+        pub adopt: bool,
+    }
+
+    /// An enum for all the different BLE message types.
+    #[allow(missing_docs)]
+    #[derive(Clone, Debug)]
+    #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+    pub enum BLEMsg {
+        HeartbeatRequest(HeartbeatRequest),
+        HeartbeatReply(HeartbeatReply),
+        RelinquishedLeadership(RelinquishedLeadership),
+    }
+
     /// A struct for a Paxos message that also includes sender and receiver.
     #[derive(Clone, Debug)]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -284,7 +310,7 @@ pub mod ballot_leader_election {
         /// Receiver of `msg`.
         pub to: NodeId,
         /// The message content.
-        pub msg: HeartbeatMsg,
+        pub msg: BLEMsg,
     }
 }
 

@@ -10,8 +10,8 @@ where
 {
     /// Vector which contains all the logged entries in-memory.
     log: Vec<T>,
-    /// Last promised round.
-    n_prom: Option<Ballot>,
+    /// (Last promised round, owner pid of promised ballot).
+    n_prom: Option<(Ballot, u64)>,
     /// Last accepted round.
     acc_round: Option<Ballot>,
     /// Length of the decided log.
@@ -40,7 +40,7 @@ where
                 StorageOp::AppendOnPrefix(from_idx, entries) => {
                     self.append_on_prefix(from_idx, entries)?
                 }
-                StorageOp::SetPromise(bal) => self.set_promise(bal)?,
+                StorageOp::SetPromise(bal, leader) => self.set_promise(bal, leader)?,
                 StorageOp::SetDecidedIndex(idx) => self.set_decided_idx(idx)?,
                 StorageOp::SetAcceptedRound(bal) => self.set_accepted_round(bal)?,
                 StorageOp::SetCompactedIdx(idx) => self.set_compacted_idx(idx)?,
@@ -69,8 +69,8 @@ where
         self.append_entries(entries)
     }
 
-    fn set_promise(&mut self, n_prom: Ballot) -> StorageResult<()> {
-        self.n_prom = Some(n_prom);
+    fn set_promise(&mut self, n_prom: Ballot, leader: u64) -> StorageResult<()> {
+        self.n_prom = Some((n_prom, leader));
         Ok(())
     }
 
@@ -109,7 +109,7 @@ where
         })
     }
 
-    fn get_promise(&self) -> StorageResult<Option<Ballot>> {
+    fn get_promise(&self) -> StorageResult<Option<(Ballot, u64)>> {
         Ok(self.n_prom)
     }
 

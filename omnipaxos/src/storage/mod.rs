@@ -4,7 +4,10 @@ mod state_cache;
 use super::ballot_leader_election::Ballot;
 #[cfg(feature = "unicache")]
 use crate::unicache::*;
-use crate::{util::Quorum, ClusterConfig};
+use crate::{
+    util::{NodeId, Quorum},
+    ClusterConfig,
+};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 use std::{cmp::Ordering, error::Error, fmt::Debug};
@@ -148,7 +151,7 @@ pub enum StorageOp<T: Entry> {
     /// Appends entries to the log from the prefix specified by the given index.
     AppendOnPrefix(usize, Vec<T>),
     /// Sets the round that has been promised.
-    SetPromise(Ballot),
+    SetPromise(Ballot, NodeId),
     /// Sets the decided index in the log.
     SetDecidedIndex(usize),
     /// Sets the latest accepted round.
@@ -187,7 +190,7 @@ where
     fn append_on_prefix(&mut self, from_idx: usize, entries: Vec<T>) -> StorageResult<()>;
 
     /// Sets the round that has been promised.
-    fn set_promise(&mut self, n_prom: Ballot) -> StorageResult<()>;
+    fn set_promise(&mut self, n_prom: Ballot, leader: NodeId) -> StorageResult<()>;
 
     /// Sets the decided index in the log.
     fn set_decided_idx(&mut self, ld: usize) -> StorageResult<()>;
@@ -214,7 +217,7 @@ where
     fn get_suffix(&self, from: usize) -> StorageResult<Vec<T>>;
 
     /// Returns the round that has been promised.
-    fn get_promise(&self) -> StorageResult<Option<Ballot>>;
+    fn get_promise(&self) -> StorageResult<Option<(Ballot, NodeId)>>;
 
     /// Sets the entry of the current configuration.
     fn set_config(&mut self, config: ConfigLog) -> StorageResult<()>;

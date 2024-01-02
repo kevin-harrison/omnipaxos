@@ -20,11 +20,13 @@ where
         #[cfg(feature = "logging")]
         debug!(self.logger, "Newly elected leader: {:?}", n);
         if self.pid == n.pid {
-            self.leader_state = LeaderState::with(n, self.leader_state.max_pid);
+            self.leader_state = LeaderState::with(n, self.pid, self.leader_state.max_pid);
             // Flush any pending writes
             // Don't have to handle flushed entries here because we will sync with followers
             let _ = self.internal_storage.flush_batch().expect(WRITE_ERROR_MSG);
-            self.internal_storage.set_promise(n).expect(WRITE_ERROR_MSG);
+            self.internal_storage
+                .set_promise(n, self.pid)
+                .expect(WRITE_ERROR_MSG);
             /* insert my promise */
             let na = self.internal_storage.get_accepted_round();
             let decided_idx = self.get_decided_idx();
@@ -59,7 +61,7 @@ where
         }
     }
 
-    pub(crate) fn become_follower(&mut self) {
+    fn become_follower(&mut self) {
         self.state.0 = Role::Follower;
     }
 
@@ -514,6 +516,34 @@ where
             self.leader_state
                 .set_accepted_idx(self.pid, metadata.accepted_idx);
             self.send_acceptdecide(metadata);
+        }
+    }
+
+    pub(crate) fn relinquish_leadership(&mut self, to: NodeId) -> Option<bool> {
+        if self.state.0 != Role::Leader {
+            None
+        } else if self.state.1 == Phase::Accept
+            && self.leader_state.get_promised_followers().contains(&to)
+        {
+            self.leader_state.increment_seq_num_session(self.pid);
+            self.current_seq_num = self.leader_state.next_seq_num(self.pid);
+            self.latest_accepted_meta = None;
+            let rel_msg = RelinquishedLeadership {
+                seq_num: self.leader_state.next_seq_num(to),
+                leader_state: self.leader_state.clone(),
+            };
+            self.outgoing.push(PaxosMessage {
+                from: self.pid,
+                to,
+                msg: PaxosMsg::RelinquishedLeadership(rel_msg),
+            });
+            self.state = (Role::Follower, Phase::Accept);
+            self.internal_storage
+                .set_promise(self.get_promise(), to)
+                .expect(WRITE_ERROR_MSG);
+            Some(true)
+        } else {
+            Some(false)
         }
     }
 

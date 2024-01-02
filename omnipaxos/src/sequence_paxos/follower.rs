@@ -17,7 +17,7 @@ where
             // Don't have to handle flushed entries here because we will sync with followers
             let _ = self.internal_storage.flush_batch().expect(WRITE_ERROR_MSG);
             self.internal_storage
-                .set_promise(prep.n)
+                .set_promise(prep.n, from)
                 .expect(WRITE_ERROR_MSG);
             self.state = (Role::Follower, Phase::Prepare);
             self.current_seq_num = SequenceNumber::default();
@@ -52,7 +52,9 @@ where
     }
 
     pub(crate) fn handle_acceptsync(&mut self, accsync: AcceptSync<T>, from: NodeId) {
-        if self.check_valid_ballot(accsync.n) && self.state == (Role::Follower, Phase::Prepare) {
+        if self.check_valid_ballot(accsync.n, from)
+            && self.state == (Role::Follower, Phase::Prepare)
+        {
             let (new_accepted_idx, new_config_accepted_idx) = self
                 .internal_storage
                 .sync_logs(
@@ -73,13 +75,13 @@ where
             self.state = (Role::Follower, Phase::Accept);
             self.current_seq_num = accsync.seq_num;
             let cached_idx = self.outgoing.len();
-            self.latest_accepted_meta = Some((accsync.n, cached_idx));
+            self.latest_accepted_meta = Some((accsync.n, from, cached_idx));
             self.outgoing.push(PaxosMessage {
                 from: self.pid,
                 to: from,
                 msg: PaxosMsg::Accepted(accepted),
             });
-            self.reply_accepted_config(accsync.n, new_config_accepted_idx);
+            self.reply_accepted_config(accsync.n, from, new_config_accepted_idx);
             #[cfg(feature = "unicache")]
             self.internal_storage.set_unicache(accsync.unicache);
         }
@@ -92,10 +94,10 @@ where
         }
     }
 
-    pub(crate) fn handle_acceptdecide(&mut self, acc_dec: AcceptDecide<T>) {
-        if self.check_valid_ballot(acc_dec.n)
+    pub(crate) fn handle_acceptdecide(&mut self, acc_dec: AcceptDecide<T>, from: NodeId) {
+        if self.check_valid_ballot(acc_dec.n, from)
             && self.state == (Role::Follower, Phase::Accept)
-            && self.handle_sequence_num(acc_dec.seq_num, acc_dec.n.pid) == MessageStatus::Expected
+            && self.handle_sequence_num(acc_dec.seq_num, from) == MessageStatus::Expected
         {
             #[cfg(not(feature = "unicache"))]
             let entries = acc_dec.entries;
@@ -111,30 +113,30 @@ where
                 new_accepted_idx = flushed_after_decide;
             }
             if let Some(idx) = new_accepted_idx {
-                self.reply_accepted(acc_dec.n, idx);
+                self.reply_accepted(acc_dec.n, from, idx);
             }
         }
     }
 
-    pub(crate) fn handle_accept_quorum_config(&mut self, acc_qc: AcceptConfig) {
-        if self.check_valid_ballot(acc_qc.n)
+    pub(crate) fn handle_accept_quorum_config(&mut self, acc_qc: AcceptConfig, from: NodeId) {
+        if self.check_valid_ballot(acc_qc.n, from)
             && self.state == (Role::Follower, Phase::Accept)
-            && self.handle_sequence_num(acc_qc.seq_num, acc_qc.n.pid) == MessageStatus::Expected
+            && self.handle_sequence_num(acc_qc.seq_num, from) == MessageStatus::Expected
         {
-            // NOTE: Need to update quorum here because BLE needs to know current quorum in order to
+            // NOTE: We update quorum here because BLE needs to know current quorum in order to
             // function correctly
             let config_accepted_idx = self
                 .internal_storage
                 .append_quorum_config(acc_qc.quorum_config)
                 .expect(WRITE_ERROR_MSG);
-            self.reply_accepted_config(acc_qc.n, config_accepted_idx);
+            self.reply_accepted_config(acc_qc.n, from, config_accepted_idx);
         }
     }
 
-    pub(crate) fn handle_accept_stopsign(&mut self, acc_ss: AcceptStopSign) {
-        if self.check_valid_ballot(acc_ss.n)
+    pub(crate) fn handle_accept_stopsign(&mut self, acc_ss: AcceptStopSign, from: NodeId) {
+        if self.check_valid_ballot(acc_ss.n, from)
             && self.state == (Role::Follower, Phase::Accept)
-            && self.handle_sequence_num(acc_ss.seq_num, acc_ss.n.pid) == MessageStatus::Expected
+            && self.handle_sequence_num(acc_ss.seq_num, from) == MessageStatus::Expected
         {
             // Flush entries before appending stopsign. The accepted index is ignored here as
             // it will be updated when appending stopsign.
@@ -143,31 +145,59 @@ where
                 .internal_storage
                 .set_stopsign(Some(acc_ss.ss))
                 .expect(WRITE_ERROR_MSG);
-            self.reply_accepted(acc_ss.n, new_accepted_idx);
+            self.reply_accepted(acc_ss.n, from, new_accepted_idx);
         }
     }
 
-    pub(crate) fn handle_decide(&mut self, dec: Decide) {
-        if self.check_valid_ballot(dec.n)
+    pub(crate) fn handle_decide(&mut self, dec: Decide, from: NodeId) {
+        if self.check_valid_ballot(dec.n, from)
             && self.state.1 == Phase::Accept
-            && self.handle_sequence_num(dec.seq_num, dec.n.pid) == MessageStatus::Expected
+            && self.handle_sequence_num(dec.seq_num, from) == MessageStatus::Expected
         {
             let new_accepted_idx = self.update_decided_idx_and_get_accepted_idx(dec.decided_idx);
             if let Some(idx) = new_accepted_idx {
-                self.reply_accepted(dec.n, idx);
+                self.reply_accepted(dec.n, from, idx);
             }
         }
     }
 
-    pub(crate) fn handle_decide_config(&mut self, dec_config: DecideConfig) {
-        if self.check_valid_ballot(dec_config.n)
+    pub(crate) fn handle_decide_config(&mut self, dec_config: DecideConfig, from: NodeId) {
+        if self.check_valid_ballot(dec_config.n, from)
             && self.state.1 == Phase::Accept
-            && self.handle_sequence_num(dec_config.seq_num, dec_config.n.pid)
-                == MessageStatus::Expected
+            && self.handle_sequence_num(dec_config.seq_num, from) == MessageStatus::Expected
         {
             self.internal_storage
                 .set_config_decided_idx(dec_config.decided_idx)
                 .expect(WRITE_ERROR_MSG);
+        }
+    }
+
+    pub(crate) fn handle_relinquished_leadership(
+        &mut self,
+        rel: RelinquishedLeadership<T>,
+        from: NodeId,
+    ) {
+        if self.check_valid_ballot(rel.leader_state.n_leader, from)
+            && self.state.1 == Phase::Accept
+            && self.handle_sequence_num(rel.seq_num, from) == MessageStatus::Expected
+        {
+            self.leader_state = rel.leader_state;
+            self.leader_state.pid = self.pid;
+            self.leader_state.batch_accept_meta = vec![None; self.leader_state.max_pid];
+            self.state = (Role::Leader, Phase::Accept);
+            self.internal_storage
+                .set_promise(self.get_promise(), self.pid)
+                .expect(WRITE_ERROR_MSG);
+            let accepted = Accepted {
+                n: self.leader_state.n_leader,
+                accepted_idx: self.internal_storage.get_accepted_idx(),
+            };
+            self.handle_accepted(accepted, self.pid);
+            let accepted_config = AcceptedConfig {
+                n: self.leader_state.n_leader,
+                accepted_idx: self.internal_storage.get_config_log().accepted_idx,
+            };
+            self.handle_accepted_config(accepted_config, self.pid);
         }
     }
 
@@ -191,9 +221,9 @@ where
         }
     }
 
-    fn reply_accepted(&mut self, n: Ballot, accepted_idx: usize) {
+    fn reply_accepted(&mut self, n: Ballot, from: NodeId, accepted_idx: usize) {
         match &self.latest_accepted_meta {
-            Some((round, outgoing_idx)) if round == &n => {
+            Some((round, leader, outgoing_idx)) if *round == n && *leader == from => {
                 let PaxosMessage { msg, .. } = self.outgoing.get_mut(*outgoing_idx).unwrap();
                 match msg {
                     PaxosMsg::Accepted(a) => {
@@ -205,30 +235,37 @@ where
             _ => {
                 let accepted = Accepted { n, accepted_idx };
                 let cached_idx = self.outgoing.len();
-                self.latest_accepted_meta = Some((n, cached_idx));
+                self.latest_accepted_meta = Some((n, from, cached_idx));
                 self.outgoing.push(PaxosMessage {
                     from: self.pid,
-                    to: n.pid,
+                    to: from,
                     msg: PaxosMsg::Accepted(accepted),
                 });
             }
         };
     }
 
-    fn reply_accepted_config(&mut self, n: Ballot, accepted_idx: usize) {
+    fn reply_accepted_config(&mut self, n: Ballot, from: NodeId, accepted_idx: usize) {
         let accepted = AcceptedConfig { n, accepted_idx };
         self.outgoing.push(PaxosMessage {
             from: self.pid,
-            to: n.pid,
+            to: from,
             msg: PaxosMsg::AcceptedConfig(accepted),
         });
     }
 
     /// Also returns whether the message's ballot was promised
-    fn check_valid_ballot(&mut self, message_ballot: Ballot) -> bool {
+    fn check_valid_ballot(&mut self, message_ballot: Ballot, from: NodeId) -> bool {
         let my_promise = self.internal_storage.get_promise();
         match my_promise.cmp(&message_ballot) {
-            std::cmp::Ordering::Equal => true,
+            std::cmp::Ordering::Equal => {
+                if from != self.get_leader() {
+                    self.internal_storage
+                        .set_promise(message_ballot, from)
+                        .expect(WRITE_ERROR_MSG);
+                }
+                true
+            }
             std::cmp::Ordering::Greater => {
                 let not_acc = NotAccepted { n: my_promise };
                 #[cfg(feature = "logging")]
@@ -240,7 +277,7 @@ where
                 );
                 self.outgoing.push(PaxosMessage {
                     from: self.pid,
-                    to: message_ballot.pid,
+                    to: from,
                     msg: PaxosMsg::NotAccepted(not_acc),
                 });
                 false
@@ -252,7 +289,7 @@ where
                     self.logger,
                     "Received non-prepare message from a leader I've never promised. My: {:?}, theirs: {:?}", my_promise, message_ballot
                 );
-                self.reconnected(message_ballot.pid);
+                self.reconnected(from);
                 false
             }
         }
@@ -277,7 +314,7 @@ where
                     Some(promise) => {
                         self.outgoing.push(PaxosMessage {
                             from: self.pid,
-                            to: promise.n.pid,
+                            to: self.get_leader(),
                             msg: PaxosMsg::Promise(promise.clone()),
                         });
                     }
@@ -317,7 +354,9 @@ where
         let accepted_idx = self.internal_storage.get_accepted_idx();
         let new_accepted_idx = self.internal_storage.flush_batch().expect(WRITE_ERROR_MSG);
         if new_accepted_idx > accepted_idx {
-            self.reply_accepted(self.get_promise(), new_accepted_idx);
+            let promise = self.get_promise();
+            let leader = self.get_leader();
+            self.reply_accepted(promise, leader, new_accepted_idx);
         }
     }
 }

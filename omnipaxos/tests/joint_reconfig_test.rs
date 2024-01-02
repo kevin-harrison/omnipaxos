@@ -2,7 +2,7 @@ pub mod utils;
 
 use kompact::prelude::{promise, Ask};
 use omnipaxos::{
-    util::{FlexibleQuorum, LogEntry, NodeId},
+    util::{FlexibleQuorum, NodeId},
     ClusterConfig,
 };
 use serial_test::serial;
@@ -16,6 +16,7 @@ fn reconfig_test() {
     let mut sys = TestSystem::with(cfg);
     let initial_proposals = utils::create_proposals(1, cfg.num_proposals / 2);
     let last_proposals = utils::create_proposals(cfg.num_proposals / 2 + 1, cfg.num_proposals);
+    // When this value gets decided the reconfiguration should also be decided.
     let sentinel_value = Value::with_id(42);
     let mut expected_log = utils::create_proposals(1, cfg.num_proposals);
     expected_log.insert(cfg.num_proposals as usize / 2, sentinel_value.clone());

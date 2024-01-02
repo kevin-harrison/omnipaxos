@@ -1,7 +1,7 @@
 pub mod utils;
 
 use kompact::prelude::{promise, Ask, FutureCollection};
-use omnipaxos::ballot_leader_election::Ballot;
+use omnipaxos::{ballot_leader_election::Ballot, util::NodeId};
 use serial_test::serial;
 use std::{thread, time::Duration};
 use utils::{TestConfig, TestSystem};
@@ -15,15 +15,14 @@ fn batching_test() {
     let cfg = TestConfig::load("batching_test").expect("Test config loaded");
     let mut sys = TestSystem::with(cfg);
     let first_node = sys.nodes.get(&1).unwrap();
-    let (kprom, kfuture) = promise::<Ballot>();
+    let (kprom, kfuture) = promise::<(Ballot, NodeId)>();
     first_node.on_definition(|x| x.election_futures.push(Ask::new(kprom, ())));
     sys.start_all_nodes();
     // Wait for initial leader to become elected. Note: needed so that initial propsals don't get
     // bunched and throw off alignment with cfg.num_proposals.
-    let _leader_id = kfuture
+    let _leader = kfuture
         .wait_timeout(cfg.wait_timeout)
-        .expect("No leader has been elected in the allocated time!")
-        .pid;
+        .expect("No leader has been elected in the allocated time!");
 
     let mut futures = vec![];
     let mut last_decided_idx = 0;
