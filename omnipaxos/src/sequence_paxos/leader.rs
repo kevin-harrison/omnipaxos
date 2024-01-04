@@ -1,4 +1,3 @@
-
 use super::super::{
     ballot_leader_election::Ballot,
     util::{LeaderState, PromiseMetaData},
