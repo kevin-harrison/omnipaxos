@@ -34,6 +34,12 @@ fn relinquish_test() {
     // Make some more propsals
     sys.make_proposals(1, last_proposals, cfg.wait_timeout);
 
+    // Verify leadership change
+    for pid in sys.nodes.keys() {
+        let nodes_leader = sys.get_elected_leader(*pid, cfg.wait_timeout);
+        assert_eq!(nodes_leader, next_leader_id);
+    }
+
     // Verify log
     let leader = sys.nodes.get(&next_leader_id).unwrap();
     let leaders_log = leader.on_definition(|x| x.read_decided_log());

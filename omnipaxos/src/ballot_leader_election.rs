@@ -1,4 +1,4 @@
-use std::cmp::Ordering;
+use std::{cmp::Ordering, time::Instant};
 
 /// Ballot Leader Election algorithm for electing new leaders
 use crate::{
@@ -76,8 +76,12 @@ pub(crate) struct BallotLeaderElection {
     peers: Vec<NodeId>,
     /// The current round of the heartbeat cycle.
     hb_round: u32,
+    /// The time when the current round started.
+    hb_round_start: Instant,
     /// The heartbeat replies this instance received during the current round.
     heartbeat_replies: Vec<HeartbeatReply>,
+    /// The time it took the other servers to reply to the heartbeats.
+    reply_latencies: Vec<Option<u128>>,
     /// Vector that holds all the received heartbeats from the previous heartbeat round, including the current node. Only used to display the connectivity of this node in the UI.
     /// Represents nodes that are currently alive from the view of the current node.
     prev_replies: Vec<HeartbeatReply>,
@@ -119,7 +123,9 @@ impl BallotLeaderElection {
             pid,
             peers,
             hb_round: 0,
+            hb_round_start: Instant::now(),
             heartbeat_replies: Vec::with_capacity(num_nodes),
+            reply_latencies: vec![None; num_nodes],
             prev_replies: Vec::with_capacity(num_nodes),
             current_ballot: initial_ballot,
             leader: initial_leader,
@@ -166,7 +172,7 @@ impl BallotLeaderElection {
     pub(crate) fn handle(&mut self, m: BLEMessage) {
         match m.msg {
             BLEMsg::HeartbeatRequest(req) => self.handle_request(m.from, req),
-            BLEMsg::HeartbeatReply(rep) => self.handle_reply(rep),
+            BLEMsg::HeartbeatReply(rep) => self.handle_reply(m.from, rep),
             BLEMsg::RelinquishedLeadership(rel) => self.handle_relinquished_leadership(rel),
         }
     }
@@ -175,6 +181,10 @@ impl BallotLeaderElection {
     pub(crate) fn new_hb_round(&mut self) {
         self.prev_replies = std::mem::take(&mut self.heartbeat_replies);
         self.hb_round += 1;
+        // TODO: should this be here or at get_outgoing_msgs?
+        self.hb_round_start = Instant::now();
+        self.reply_latencies = vec![None; self.peers.len() + 1];
+        self.reply_latencies[(self.pid - 1) as usize] = Some(0);
         #[cfg(feature = "logging")]
         trace!(
             self.logger,
@@ -199,11 +209,12 @@ impl BallotLeaderElection {
         seq_paxos_state: &(Role, Phase),
         seq_paxos_promise: Ballot,
         seq_paxos_quorum: Quorum,
-    ) -> Option<Ballot> {
+    ) -> (Option<Ballot>, Vec<Option<u128>>) {
         self.quorum = seq_paxos_quorum;
         self.update_leader();
         self.update_happiness(seq_paxos_state);
         self.check_takeover();
+        let latencies = std::mem::take(&mut self.reply_latencies);
         self.new_hb_round();
         if seq_paxos_promise > self.leader {
             // Sync leader with Paxos promise in case ballot didn't make it to BLE followers
@@ -211,9 +222,9 @@ impl BallotLeaderElection {
             self.happy = true;
         }
         if self.leader == self.current_ballot {
-            Some(self.current_ballot)
+            (Some(self.current_ballot), latencies)
         } else {
-            None
+            (None, latencies)
         }
     }
 
@@ -286,8 +297,10 @@ impl BallotLeaderElection {
         });
     }
 
-    fn handle_reply(&mut self, rep: HeartbeatReply) {
+    fn handle_reply(&mut self, from: NodeId, rep: HeartbeatReply) {
         if rep.round == self.hb_round && rep.ballot.config_id == self.configuration_id {
+            let latency = (Instant::now() - self.hb_round_start).as_millis();
+            self.reply_latencies[(from - 1) as usize] = Some(latency);
             self.heartbeat_replies.push(rep);
         }
     }

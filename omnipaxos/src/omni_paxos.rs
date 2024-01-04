@@ -434,14 +434,16 @@ where
     /// If the heartbeat of a leader is not received when election_timeout() is called, the server might attempt to become the leader.
     /// It is also used for the election process, where the server checks if it can become the leader.
     /// For instance if `election_timeout()` is called every 100ms, then if the leader fails, the servers will detect it after 100ms and elect a new server after another 100ms if possible.
-    fn election_timeout(&mut self) {
-        if let Some(new_leader) = self.ble.hb_timeout(
+    fn election_timeout(&mut self) -> Vec<Option<u128>> {
+        let (new_leader, latencies) = self.ble.hb_timeout(
             self.seq_paxos.get_state(),
             self.seq_paxos.get_promise(),
             self.seq_paxos.get_quorum(),
-        ) {
-            self.seq_paxos.handle_leader(new_leader);
+        );
+        if let Some(leader) = new_leader {
+            self.seq_paxos.handle_leader(leader);
         }
+        latencies
     }
 
     /// Returns the current states of the OmniPaxos instance for OmniPaxos UI to display.

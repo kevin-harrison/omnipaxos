@@ -1,3 +1,4 @@
+
 use super::super::{
     ballot_leader_election::Ballot,
     util::{LeaderState, PromiseMetaData},
@@ -520,7 +521,7 @@ where
     }
 
     pub(crate) fn relinquish_leadership(&mut self, to: NodeId) -> Option<bool> {
-        if self.state.0 != Role::Leader {
+        if self.state.0 != Role::Leader || to == self.pid {
             None
         } else if self.state.1 == Phase::Accept
             && self.leader_state.get_promised_followers().contains(&to)
