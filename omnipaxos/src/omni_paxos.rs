@@ -285,6 +285,16 @@ where
         self.seq_paxos.get_promise()
     }
 
+    /// Return the cluster's current configuration.
+    pub fn get_config(&self) -> QuorumConfig {
+        self.seq_paxos.internal_storage.get_quorum_config()
+    }
+
+    /// Returns this node's peers
+    pub fn get_peers(&self) -> &Vec<NodeId> {
+        self.seq_paxos.get_peers()
+    }
+
     /// Returns the outgoing messages from this server. The messages should then be sent via the network implementation.
     pub fn outgoing_messages(&mut self) -> Vec<Message<T>> {
         let paxos_msgs = self
@@ -386,11 +396,6 @@ where
                 .seq_paxos
                 .reconfigure_joint_consensus(new_configuration),
         }
-    }
-
-    /// Return the cluster's current configuration.
-    pub fn get_config(&self) -> QuorumConfig {
-        self.seq_paxos.internal_storage.get_quorum_config()
     }
 
     /// Handles re-establishing a connection to a previously disconnected peer.
