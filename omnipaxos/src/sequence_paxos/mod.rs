@@ -218,6 +218,11 @@ where
         self.internal_storage.get_decided_idx()
     }
 
+    /// Return the decided index.
+    pub(crate) fn get_accepted_idx(&self) -> usize {
+        self.internal_storage.get_accepted_idx()
+    }
+
     /// Return trim index from storage.
     pub(crate) fn get_compacted_idx(&self) -> usize {
         self.internal_storage.get_compacted_idx()
