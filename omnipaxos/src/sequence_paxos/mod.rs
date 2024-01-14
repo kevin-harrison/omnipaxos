@@ -4,7 +4,7 @@ use crate::utils::logger::create_logger;
 use crate::{
     storage::{
         internal_storage::{InternalStorage, InternalStorageConfig},
-        Entry, QuorumConfig, Snapshot, StopSign, Storage,
+        Entry, QuorumConfig, Snapshot, StopSign, Storage, ReadQuorumConfig,
     },
     util::{
         FlexibleQuorum, LogSync, NodeId, Quorum, SequenceNumber, READ_ERROR_MSG, WRITE_ERROR_MSG,
@@ -138,6 +138,15 @@ where
 
     pub(crate) fn get_quorum(&self) -> Quorum {
         self.internal_storage.get_quorum()
+    }
+
+    pub(crate) fn get_read_config(&self) -> ReadQuorumConfig {
+        let config_log = self.internal_storage.get_config_log();
+        ReadQuorumConfig {
+            n_accepted: self.internal_storage.get_accepted_round(),
+            config_log_accepted_idx: config_log.accepted_idx,
+            read_quorum_size: config_log.config.get_active_quorum().read_quorum_size,
+        }
     }
 
     pub(crate) fn get_peers(&self) -> &Vec<NodeId> {

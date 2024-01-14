@@ -69,6 +69,27 @@ impl PartialOrd for ConfigLog {
     }
 }
 
+/// The current read quorum config used for linearizable quorum reads.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct ReadQuorumConfig {
+    /// The current n_accepted
+    pub n_accepted: Ballot,
+    /// The accepted index of the config log.
+    pub config_log_accepted_idx: usize,
+    /// The read quorum size of the config
+    pub read_quorum_size: usize,
+}
+
+impl PartialOrd for ReadQuorumConfig {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        let ordering =
+            (self.n_accepted, self.config_log_accepted_idx).cmp(&(other.n_accepted, other.config_log_accepted_idx));
+        Some(ordering)
+    }
+}
+
+
 /// The current quorum of the configuration.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]

@@ -3,7 +3,7 @@ use crate::{
     errors::{valid_config, ConfigError},
     messages::Message,
     sequence_paxos::SequencePaxos,
-    storage::{Entry, QuorumConfig, StopSign, Storage},
+    storage::{Entry, StopSign, Storage, ReadQuorumConfig},
     util::{
         defaults::{BUFFER_SIZE, ELECTION_TIMEOUT, FLUSH_BATCH_TIMEOUT, RESEND_MESSAGE_TIMEOUT},
         ConfigurationId, FlexibleQuorum, LogEntry, LogicalClock, NodeId,
@@ -290,9 +290,9 @@ where
         self.seq_paxos.get_promise()
     }
 
-    /// Return the cluster's current configuration.
-    pub fn get_config(&self) -> QuorumConfig {
-        self.seq_paxos.internal_storage.get_quorum_config()
+    /// Return the cluster's current read configuration for linearizable reads.
+    pub fn get_read_config(&self) -> ReadQuorumConfig {
+        self.seq_paxos.get_read_config()
     }
 
     /// Returns this node's peers
