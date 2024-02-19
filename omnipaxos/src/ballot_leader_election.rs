@@ -220,6 +220,7 @@ impl BallotLeaderElection {
         let my_idx = self.pid as usize - 1;
         latency_start[my_idx] = Some(0);
         self.reply_latencies[my_idx] = Some(latency_start);
+        self.prev_latencies = latencies_this_round[my_idx].clone();
         latencies_this_round
     }
 
