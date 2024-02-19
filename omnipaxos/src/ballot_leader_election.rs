@@ -215,8 +215,9 @@ impl BallotLeaderElection {
 
     fn reset_latencies(&mut self) -> Vec<Option<NodeLatencies>> {
         let latencies_this_round = std::mem::take(&mut self.reply_latencies);
+        self.reply_latencies = vec![None; latencies_this_round.len()];
+        let mut latency_start = vec![None; latencies_this_round.len()];
         let my_idx = self.pid as usize - 1;
-        let mut latency_start = vec![None; self.reply_latencies.len()];
         latency_start[my_idx] = Some(0);
         self.reply_latencies[my_idx] = Some(latency_start);
         latencies_this_round
