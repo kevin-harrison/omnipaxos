@@ -255,7 +255,7 @@ pub mod sequence_paxos {
 /// The different messages BLE uses to communicate with other servers.
 pub mod ballot_leader_election {
 
-    use crate::{ballot_leader_election::Ballot, util::NodeId};
+    use crate::{ballot_leader_election::{Ballot, NodeLatencies}, util::NodeId};
     #[cfg(feature = "serde")]
     use serde::{Deserialize, Serialize};
 
@@ -279,6 +279,8 @@ pub mod ballot_leader_election {
         pub leader: Ballot,
         /// Whether the replying server sees a need for a new leader
         pub happy: bool,
+        /// Cluster latency from this servers point of view
+        pub latencies: Option<NodeLatencies>,
     }
 
     /// Sent by a leader who has stepped down as leader and wants another node to take over.
