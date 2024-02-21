@@ -412,9 +412,10 @@ where
     /// Increments the internal logical clock. This drives the processes for leader changes, resending dropped messages, and flushing batched log entries.
     /// Each of these is triggered every `election_tick_timeout`, `resend_message_tick_timeout`, and `flush_batch_tick_timeout` number of calls to this function
     /// (See how to configure these timeouts in `ServerConfig`).
-    pub fn tick(&mut self) {
+    pub fn tick(&mut self) -> Option<Vec<Option<NodeLatencies>>>{
+        let mut latencies = None;
         if self.election_clock.tick_and_check_timeout() {
-            self.election_timeout();
+            latencies = Some(self.election_timeout());
         }
         if self.resend_message_clock.tick_and_check_timeout() {
             self.seq_paxos.resend_message_timeout();
@@ -422,6 +423,7 @@ where
         if self.flush_batch_clock.tick_and_check_timeout() {
             self.seq_paxos.flush_batch_timeout();
         }
+        latencies
     }
 
     /// Sends a signal to the node with pid `to` to take over leadership of the cluster. If this

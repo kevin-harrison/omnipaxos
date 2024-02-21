@@ -231,8 +231,6 @@ impl BallotLeaderElection {
         seq_paxos_promise: Ballot,
         seq_paxos_quorum: Quorum,
     ) -> (Option<Ballot>, Vec<Option<NodeLatencies>>) {
-        println!("BLE debug: {:?}, {}", self.leader, self.happy);
-        println!("{:?}", self.heartbeat_replies);
         self.quorum = seq_paxos_quorum;
         self.update_leader();
         self.update_happiness(seq_paxos_state);
