@@ -570,6 +570,10 @@ where
         self.state_cache.config_log.decided_idx
     }
 
+    pub(crate) fn get_config_accepted_idx(&self) -> usize {
+        self.state_cache.config_log.accepted_idx
+    }
+
     pub(crate) fn set_config_decided_idx(&mut self, decided_idx: usize) -> StorageResult<()> {
         self.state_cache.config_log.decided_idx = decided_idx;
         self.storage.set_config(self.state_cache.config_log)

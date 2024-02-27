@@ -276,6 +276,10 @@ where
         *self.accepted_indexes.get(Self::pid_to_idx(pid)).unwrap()
     }
 
+    pub fn get_config_accepted_idx(&self, pid: NodeId) -> usize {
+        *self.config_accepted_indexes.get(Self::pid_to_idx(pid)).unwrap()
+    }
+
     pub fn is_chosen(&self, idx: usize, current_quorum: Quorum) -> bool {
         let num_accepted = self
             .accepted_indexes

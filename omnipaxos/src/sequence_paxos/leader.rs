@@ -496,6 +496,17 @@ where
                         }
                     }
                 }
+                // TODO: There is no good way to resend an AcceptConfig message so we just resync
+                if self.pending_quorum_reconfig() {
+                    for follower in self.leader_state.get_promised_followers() {
+                        let waiting_for_followers_config_accepted = self.leader_state.get_config_accepted_idx(follower) < self.internal_storage.get_config_accepted_idx();
+                        if waiting_for_followers_config_accepted {
+                            self.leader_state.reset_promise(follower);
+                            self.leader_state.set_batch_accept_meta(follower, None);
+                            self.send_prepare(follower);
+                        }
+                    }
+                }
                 // Resend Prepare
                 let preparable_peers = self.leader_state.get_preparable_peers();
                 for peer in preparable_peers {
