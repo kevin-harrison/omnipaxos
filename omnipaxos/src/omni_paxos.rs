@@ -123,10 +123,10 @@ impl ClusterConfig {
                 write_quorum_size >= 2 && write_quorum_size <= num_nodes,
                 "Write quorum must be in range 2 to # of nodes in the cluster"
             );
-            valid_config!(
-                read_quorum_size >= write_quorum_size,
-                "Read quorum size must be >= the write quorum size."
-            );
+            // valid_config!(
+            //     read_quorum_size >= write_quorum_size,
+            //     "Read quorum size must be >= the write quorum size."
+            // );
         }
         Ok(())
     }
