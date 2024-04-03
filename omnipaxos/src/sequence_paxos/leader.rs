@@ -329,6 +329,7 @@ where
                 max_promise_config,
             )
             .expect(WRITE_ERROR_MSG);
+        self.leader_state.max_promise_acc_idx = Some(new_accepted_idx);
         if !self.pending_stopsign() {
             if !self.buffered_proposals.is_empty() {
                 let entries = std::mem::take(&mut self.buffered_proposals);

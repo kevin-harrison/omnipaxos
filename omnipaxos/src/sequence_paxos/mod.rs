@@ -146,6 +146,10 @@ where
             n_accepted: self.internal_storage.get_accepted_round(),
             config_log_accepted_idx: config_log.accepted_idx,
             read_quorum_size: config_log.config.get_active_quorum().read_quorum_size,
+            promise: self.internal_storage.get_promise(),
+            leader: self.internal_storage.get_leader(),
+            decided_idx: self.internal_storage.get_decided_idx(),
+            max_promise_acc_idx: self.leader_state.max_promise_acc_idx,
         }
     }
 

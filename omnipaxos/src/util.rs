@@ -98,6 +98,9 @@ where
     max_promise_meta: PromiseMetaData,
     max_promise_sync: Option<LogSync<T>>,
     max_promise_config: Option<(Ballot, ConfigLog)>,
+    /// The max accepted index discovered on receiving a majority of promises. If this index is decided then
+    /// it is guaranteed that the decided index >= decided index of any previous leader.
+    pub max_promise_acc_idx: Option<usize>,
     pub batch_accept_meta: Vec<Option<(Ballot, usize)>>, //  index in outgoing
     pub max_pid: usize,
 }
@@ -118,6 +121,7 @@ where
             max_promise_meta: PromiseMetaData::default(),
             max_promise_sync: None,
             max_promise_config: None,
+            max_promise_acc_idx: None,
             batch_accept_meta: vec![None; max_pid],
             max_pid,
         }
