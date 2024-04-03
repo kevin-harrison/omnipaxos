@@ -79,14 +79,6 @@ pub struct ReadQuorumConfig {
     pub config_log_accepted_idx: usize,
     /// The read quorum size of the config
     pub read_quorum_size: usize,
-    /// The current promised ballot
-    pub promise: Ballot,
-    /// The current leader
-    pub leader: NodeId,
-    /// The current decided index
-    pub decided_idx: usize,
-    /// The max_promise_acc_idx of leader state
-    pub max_promise_acc_idx: Option<usize>,
 }
 
 impl PartialOrd for ReadQuorumConfig {
