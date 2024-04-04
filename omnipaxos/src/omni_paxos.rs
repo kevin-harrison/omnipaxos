@@ -300,6 +300,11 @@ where
         self.seq_paxos.get_peers()
     }
 
+    /// Returns this node's leader state max_prom_acc_idx
+    pub fn get_max_prom_acc_idx(&self) -> Option<usize> {
+        self.seq_paxos.get_max_prom_acc_idx()
+    }
+
     /// Returns the outgoing messages from this server. The messages should then be sent via the network implementation.
     pub fn outgoing_messages(&mut self) -> Vec<Message<T>> {
         let paxos_msgs = self

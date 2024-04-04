@@ -153,6 +153,10 @@ where
         &self.peers
     }
 
+    pub(crate) fn get_max_prom_acc_idx(&self) -> Option<usize> {
+        self.leader_state.max_promise_acc_idx
+    }
+
     /// Initiates the trim process.
     /// # Arguments
     /// * `trim_idx` - Deletes all entries up to [`trim_idx`], if the [`trim_idx`] is `None` then the minimum index accepted by **ALL** servers will be used as the [`trim_idx`].
