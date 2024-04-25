@@ -12,7 +12,7 @@ where
     /*** Follower ***/
     pub(crate) fn handle_prepare(&mut self, prep: Prepare, from: NodeId) {
         let old_promise = self.internal_storage.get_promise();
-        if old_promise < prep.n || (old_promise == prep.n && self.state.1 == Phase::Recover) {
+        if old_promise <= prep.n {
             // Flush any pending writes
             // Don't have to handle flushed entries here because we will sync with followers
             let _ = self.internal_storage.flush_batch().expect(WRITE_ERROR_MSG);
