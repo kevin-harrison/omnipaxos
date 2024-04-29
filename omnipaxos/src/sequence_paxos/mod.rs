@@ -84,8 +84,13 @@ where
                 if id == pid {
                     let state = (Role::Leader, Phase::Accept);
                     let config_log = internal_storage.get_config_log();
-                    let leader_state =
-                        LeaderState::<T>::with_skip_prepare(bal, pid, peers.clone(), config_log);
+                    let leader_state = LeaderState::<T>::with_skip_prepare(
+                        bal,
+                        pid,
+                        max_pid,
+                        peers.clone(),
+                        config_log,
+                    );
                     let seq_num = SequenceNumber::default();
                     (state, leader_state, seq_num)
                 } else {

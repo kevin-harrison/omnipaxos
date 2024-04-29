@@ -130,10 +130,10 @@ where
     pub fn with_skip_prepare(
         n_leader: Ballot,
         pid: NodeId,
+        max_pid: usize,
         peers: Vec<NodeId>,
         config_log: ConfigLog,
     ) -> Self {
-        let max_pid = *peers.iter().max().unwrap() as usize;
         let mut skipped_prepare_state = LeaderState::with(n_leader, pid, max_pid);
         for peer in peers {
             let prom = Promise {
