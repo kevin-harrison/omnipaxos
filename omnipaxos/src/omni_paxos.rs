@@ -3,12 +3,12 @@ use crate::{
     errors::{valid_config, ConfigError},
     messages::Message,
     sequence_paxos::SequencePaxos,
-    storage::{Entry, StopSign, Storage, ReadQuorumConfig},
+    storage::{Entry, ReadQuorumConfig, StopSign, Storage},
     util::{
         defaults::{BUFFER_SIZE, ELECTION_TIMEOUT, FLUSH_BATCH_TIMEOUT, RESEND_MESSAGE_TIMEOUT},
-        ConfigurationId, FlexibleQuorum, LogEntry, LogicalClock, NodeId,
+        ConfigurationId, FlexibleQuorum, InitialLeader, LogEntry, LogicalClock, NodeId,
     },
-    utils::{ui, ui::ClusterState},
+    utils::ui::{self, ClusterState},
 };
 #[cfg(any(feature = "toml_config", feature = "serde"))]
 use serde::Deserialize;
@@ -64,19 +64,29 @@ impl OmniPaxosConfig {
         B: Storage<T>,
     {
         self.validate()?;
-        // Use stored ballot as initial BLE leader
-        let recovered_promise = storage
+        let recovered_leader = match storage
             .get_promise()
             .expect("storage error while trying to read promise")
-            .map(|(prom, _)| prom);
+        {
+            Some((b, _)) if b == Ballot::default() => None,
+            r => r,
+        };
+        let initial_leader = match (recovered_leader, self.cluster_config.initial_leader) {
+            (Some((bal, id)), _) => InitialLeader::Recovered(bal, id),
+            (None, Some(id)) => InitialLeader::Configured(
+                Ballot::from_skipped_prepare(self.cluster_config.configuration_id, id),
+                id,
+            ),
+            (None, None) => InitialLeader::None,
+        };
         Ok(OmniPaxos {
-            ble: BallotLeaderElection::with(self.clone().into(), recovered_promise),
+            ble: BallotLeaderElection::with(self.clone().into(), initial_leader),
             election_clock: LogicalClock::with(self.server_config.election_tick_timeout),
             resend_message_clock: LogicalClock::with(
                 self.server_config.resend_message_tick_timeout,
             ),
             flush_batch_clock: LogicalClock::with(self.server_config.flush_batch_tick_timeout),
-            seq_paxos: SequencePaxos::with(self.into(), storage),
+            seq_paxos: SequencePaxos::with(self.into(), storage, initial_leader),
         })
     }
 }
@@ -98,6 +108,8 @@ pub struct ClusterConfig {
     pub nodes: Vec<NodeId>,
     /// Defines read and write quorum sizes. Can be used for different latency vs fault tolerance tradeoffs.
     pub flexible_quorum: Option<FlexibleQuorum>,
+    /// Initial leader of the cluster.
+    pub initial_leader: Option<NodeId>,
 }
 
 impl ClusterConfig {
@@ -127,6 +139,12 @@ impl ClusterConfig {
             //     read_quorum_size >= write_quorum_size,
             //     "Read quorum size must be >= the write quorum size."
             // );
+        }
+        if let Some(leader_id) = self.initial_leader {
+            valid_config!(
+                self.nodes.contains(&leader_id),
+                "Initial leader does not exist"
+            );
         }
         Ok(())
     }
@@ -417,7 +435,7 @@ where
     /// Increments the internal logical clock. This drives the processes for leader changes, resending dropped messages, and flushing batched log entries.
     /// Each of these is triggered every `election_tick_timeout`, `resend_message_tick_timeout`, and `flush_batch_tick_timeout` number of calls to this function
     /// (See how to configure these timeouts in `ServerConfig`).
-    pub fn tick(&mut self) -> Option<Vec<Option<NodeLatencies>>>{
+    pub fn tick(&mut self) -> Option<Vec<Option<NodeLatencies>>> {
         let mut latencies = None;
         if self.election_clock.tick_and_check_timeout() {
             latencies = Some(self.election_timeout());

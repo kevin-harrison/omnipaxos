@@ -4,10 +4,11 @@ use crate::utils::logger::create_logger;
 use crate::{
     storage::{
         internal_storage::{InternalStorage, InternalStorageConfig},
-        Entry, QuorumConfig, Snapshot, StopSign, Storage, ReadQuorumConfig,
+        Entry, QuorumConfig, ReadQuorumConfig, Snapshot, StopSign, Storage,
     },
     util::{
-        FlexibleQuorum, LogSync, NodeId, Quorum, SequenceNumber, READ_ERROR_MSG, WRITE_ERROR_MSG,
+        FlexibleQuorum, InitialLeader, LogSync, NodeId, Quorum, SequenceNumber, READ_ERROR_MSG,
+        WRITE_ERROR_MSG,
     },
     ClusterConfig, CompactionErr, OmniPaxosConfig, ProposeErr,
 };
@@ -53,44 +54,70 @@ where
 {
     /*** User functions ***/
     /// Creates a Sequence Paxos replica.
-    pub(crate) fn with(config: SequencePaxosConfig, storage: B) -> Self {
+    pub(crate) fn with(
+        config: SequencePaxosConfig,
+        storage: B,
+        initial_leader: InitialLeader,
+    ) -> Self {
         let pid = config.pid;
         let peers = config.peers;
         let num_nodes = &peers.len() + 1;
         let max_peer_pid = peers.iter().max().unwrap();
         let max_pid = *std::cmp::max(max_peer_pid, &pid) as usize;
         let mut outgoing = Vec::with_capacity(config.buffer_size);
-        let (state, promise, leader) = match storage
-            .get_promise()
-            .expect("storage error while trying to read promise")
-        {
-            // if we recover a promise from storage then we must do failure recovery
-            Some((prom, leader)) => {
+        let initial_quorum = Quorum::with(config.flexible_quorum, num_nodes);
+        let internal_storage_config = InternalStorageConfig {
+            batch_size: config.batch_size,
+            initial_quorum_config: QuorumConfig::Stable(initial_quorum),
+        };
+        let mut internal_storage = InternalStorage::with(
+            storage,
+            internal_storage_config,
+            #[cfg(feature = "unicache")]
+            pid,
+        );
+        let (state, leader_state, current_seq_num) = match initial_leader {
+            InitialLeader::Configured(bal, id) => {
+                internal_storage
+                    .set_promise(bal, id)
+                    .expect(WRITE_ERROR_MSG);
+                if id == pid {
+                    let state = (Role::Leader, Phase::Accept);
+                    let config_log = internal_storage.get_config_log();
+                    let leader_state =
+                        LeaderState::<T>::with_skip_prepare(bal, pid, peers.clone(), config_log);
+                    let seq_num = SequenceNumber::default();
+                    (state, leader_state, seq_num)
+                } else {
+                    let state = (Role::Follower, Phase::Accept);
+                    let leader_state = LeaderState::with(bal, pid, max_pid);
+                    let seq_num = SequenceNumber::skipped_prepare();
+                    (state, leader_state, seq_num)
+                }
+            }
+            InitialLeader::Recovered(bal, _id) => {
                 let state = (Role::Follower, Phase::Recover);
+                let leader_state = LeaderState::with(bal, pid, max_pid);
+                let seq_num = SequenceNumber::default();
                 for peer_pid in &peers {
-                    let prepreq = PrepareReq { n: prom };
+                    let prepreq = PrepareReq { n: bal };
                     outgoing.push(PaxosMessage {
                         from: pid,
                         to: *peer_pid,
                         msg: PaxosMsg::PrepareReq(prepreq),
                     });
                 }
-                (state, prom, leader)
+                (state, leader_state, seq_num)
             }
-            None => ((Role::Follower, Phase::None), Ballot::default(), 0),
+            InitialLeader::None => {
+                let state = (Role::Follower, Phase::None);
+                let leader_state = LeaderState::with(Ballot::default(), pid, max_pid);
+                let seq_num = SequenceNumber::default();
+                (state, leader_state, seq_num)
+            }
         };
-        let initial_quorum = Quorum::with(config.flexible_quorum, num_nodes);
-        let internal_storage_config = InternalStorageConfig {
-            batch_size: config.batch_size,
-            initial_quorum_config: QuorumConfig::Stable(initial_quorum),
-        };
-        let mut paxos = SequencePaxos {
-            internal_storage: InternalStorage::with(
-                storage,
-                internal_storage_config,
-                #[cfg(feature = "unicache")]
-                pid,
-            ),
+        let paxos = SequencePaxos {
+            internal_storage,
             pid,
             peers,
             state,
@@ -98,9 +125,9 @@ where
             buffered_reconfig: None,
             buffered_stopsign: None,
             outgoing,
-            leader_state: LeaderState::<T>::with(promise, pid, max_pid),
+            leader_state,
             latest_accepted_meta: None,
-            current_seq_num: SequenceNumber::default(),
+            current_seq_num,
             cached_promise_message: None,
             buffer_size: config.buffer_size,
             #[cfg(feature = "logging")]
@@ -115,10 +142,6 @@ where
                 }
             },
         };
-        paxos
-            .internal_storage
-            .set_promise(promise, leader)
-            .expect(WRITE_ERROR_MSG);
         #[cfg(feature = "logging")]
         info!(paxos.logger, "Paxos component pid: {} created!", pid);
         paxos

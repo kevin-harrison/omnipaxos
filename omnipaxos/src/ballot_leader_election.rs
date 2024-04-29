@@ -4,7 +4,7 @@ use std::{cmp::Ordering, time::Instant};
 use crate::{
     messages::ballot_leader_election::{BLEMsg, RelinquishedLeadership},
     sequence_paxos::{Phase, Role},
-    util::{defaults::*, ConfigurationId, FlexibleQuorum, Quorum},
+    util::{defaults::*, ConfigurationId, FlexibleQuorum, InitialLeader, Quorum},
 };
 
 #[cfg(feature = "logging")]
@@ -47,6 +47,16 @@ impl Ballot {
             pid,
         }
     }
+
+    /// Create an initial ballot for a skipped prepare initialization
+    pub fn from_skipped_prepare(config_id: ConfigurationId, pid: NodeId) -> Ballot {
+        Ballot {
+            config_id,
+            n: INITIAL_ROUND + 1,
+            priority: 0,
+            pid,
+        }
+    }
 }
 
 impl Ord for Ballot {
@@ -63,7 +73,6 @@ impl PartialOrd for Ballot {
 
 const INITIAL_ROUND: u32 = 1;
 const RECOVERY_ROUND: u32 = 0;
-
 
 /// Cluster latencies from the point of view of a node
 pub type NodeLatencies = Vec<Option<u64>>;
@@ -109,20 +118,21 @@ pub(crate) struct BallotLeaderElection {
 
 impl BallotLeaderElection {
     /// Construct a new BallotLeaderElection node
-    pub(crate) fn with(config: BLEConfig, recovered_leader: Option<Ballot>) -> Self {
+    pub(crate) fn with(config: BLEConfig, initial_leader: InitialLeader) -> Self {
         let config_id = config.configuration_id;
         let pid = config.pid;
         let peers = config.peers;
         let num_nodes = &peers.len() + 1;
         let quorum = Quorum::with(config.flexible_quorum, num_nodes);
         let mut initial_ballot = Ballot::with(config_id, INITIAL_ROUND, config.priority, pid);
-        let initial_leader = match recovered_leader {
-            Some(b) if b != Ballot::default() => {
+        let initial_leader = match initial_leader {
+            InitialLeader::Configured(bal, _) => bal,
+            InitialLeader::Recovered(bal, _) => {
                 // Prevents a recovered server from retaining BLE leadership with the same ballot.
                 initial_ballot.n = RECOVERY_ROUND;
-                b
+                bal
             }
-            _ => initial_ballot,
+            InitialLeader::None => initial_ballot,
         };
         let mut initial_latencies = vec![None; num_nodes];
         let mut my_init_latencies = vec![None; num_nodes];

@@ -127,6 +127,30 @@ where
         }
     }
 
+    pub fn with_skip_prepare(
+        n_leader: Ballot,
+        pid: NodeId,
+        peers: Vec<NodeId>,
+        config_log: ConfigLog,
+    ) -> Self {
+        let max_pid = *peers.iter().max().unwrap() as usize;
+        let mut skipped_prepare_state = LeaderState::with(n_leader, pid, max_pid);
+        for peer in peers {
+            let prom = Promise {
+                n: n_leader,
+                n_accepted: Ballot::default(),
+                decided_idx: 0,
+                accepted_idx: 0,
+                log_sync: None,
+                config_log,
+            };
+            skipped_prepare_state.set_promise(prom, peer, true);
+            skipped_prepare_state.increment_seq_num_session(peer);
+            skipped_prepare_state.next_seq_num(peer);
+        }
+        skipped_prepare_state
+    }
+
     fn pid_to_idx(pid: NodeId) -> usize {
         (pid - 1) as usize
     }
@@ -281,7 +305,10 @@ where
     }
 
     pub fn get_config_accepted_idx(&self, pid: NodeId) -> usize {
-        *self.config_accepted_indexes.get(Self::pid_to_idx(pid)).unwrap()
+        *self
+            .config_accepted_indexes
+            .get(Self::pid_to_idx(pid))
+            .unwrap()
     }
 
     pub fn is_chosen(&self, idx: usize, current_quorum: Quorum) -> bool {
@@ -433,6 +460,13 @@ impl SequenceNumber {
             MessageStatus::DroppedPreceding
         }
     }
+
+    pub(crate) fn skipped_prepare() -> SequenceNumber {
+        SequenceNumber {
+            session: 1,
+            counter: 1,
+        }
+    }
 }
 
 pub(crate) struct LogicalClock {
@@ -527,4 +561,12 @@ pub(crate) struct AcceptedMetaData<T: Entry> {
     pub entries: Vec<T>,
     #[cfg(feature = "unicache")]
     pub entries: Vec<T::EncodeResult>,
+}
+
+/// Initial leader of the cluster
+#[derive(Debug, Copy, Clone)]
+pub(crate) enum InitialLeader {
+    Configured(Ballot, NodeId),
+    Recovered(Ballot, NodeId),
+    None,
 }
