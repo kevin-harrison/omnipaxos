@@ -481,6 +481,11 @@ where
         latencies
     }
 
+    /// Become leader with the given ballot. Assumes no leader election.
+    pub fn initialize_prepare_phase(&mut self, n: Ballot) {
+        self.seq_paxos.handle_leader(n);
+    }
+
     /// Returns the current states of the OmniPaxos instance for OmniPaxos UI to display.
     pub fn get_ui_states(&self) -> ui::OmniPaxosStates {
         let mut cluster_state = ClusterState::from(self.seq_paxos.get_leader_state());
