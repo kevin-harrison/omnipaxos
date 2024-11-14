@@ -129,7 +129,7 @@ where
             .accepted_per_slot
             .insert(slot_idx, new_num_accepted);
         // Send AcceptDecide
-        self.send_single_acceptdecide(entry);
+        self.send_single_acceptdecide(slot_idx, entry);
     }
 
     pub(crate) fn accept_entries_leader(&mut self, entries: Vec<T>) {
@@ -155,7 +155,7 @@ where
                 .insert(slot_idx, new_num_accepted);
         }
         // Send AcceptDecide
-        self.send_acceptdecide(entries);
+        self.send_acceptdecide(start_idx, entries);
     }
 
     pub(crate) fn accept_stopsign_leader(&mut self, ss: StopSign) {
@@ -219,7 +219,7 @@ where
         self.outgoing.push(msg);
     }
 
-    fn send_acceptdecide(&mut self, entries: Vec<T>) {
+    fn send_acceptdecide(&mut self, start_idx: usize, entries: Vec<T>) {
         let decided_idx = self.internal_storage.get_decided_idx();
         for pid in self.leader_state.get_promised_followers() {
             let cached_acceptdecide = match self.leader_state.get_batch_accept_meta(pid) {
@@ -246,6 +246,7 @@ where
                         n: self.leader_state.n_leader,
                         seq_num: self.leader_state.next_seq_num(pid),
                         decided_idx,
+                        start_idx,
                         entries: entries.clone(),
                     };
                     self.outgoing.push(PaxosMessage {
@@ -260,7 +261,7 @@ where
 
     // Code duplication, but removes an allocation on the hot path since we often append single
     // entries
-    fn send_single_acceptdecide(&mut self, entry: T) {
+    fn send_single_acceptdecide(&mut self, start_idx: usize, entry: T) {
         let decided_idx = self.internal_storage.get_decided_idx();
         for pid in self.leader_state.get_promised_followers() {
             let cached_acceptdecide = match self.leader_state.get_batch_accept_meta(pid) {
@@ -289,6 +290,7 @@ where
                         n: self.leader_state.n_leader,
                         seq_num: self.leader_state.next_seq_num(pid),
                         decided_idx,
+                        start_idx,
                         entries: init_entries_vec,
                     };
                     self.outgoing.push(PaxosMessage {
