@@ -93,8 +93,6 @@ pub mod sequence_paxos {
         pub seq_num: SequenceNumber,
         /// The decided index.
         pub decided_idx: usize,
-        /// log index to append at.
-        pub start_idx: usize,
         #[cfg(not(feature = "unicache"))]
         /// Entries to be replicated.
         pub entries: Vec<T>,

@@ -99,16 +99,38 @@ where
             && self.state == (Role::Follower, Phase::Accept)
             && self.handle_sequence_num(acc_dec.seq_num, acc_dec.n.pid) == MessageStatus::Expected
         {
+            // metronome changes
+            self.internal_storage
+                .set_decided_idx(acc_dec.decided_idx)
+                .expect(WRITE_ERROR_MSG);
             #[cfg(not(feature = "unicache"))]
             let entries = acc_dec.entries;
             #[cfg(feature = "unicache")]
             let entries = self.internal_storage.decode_entries(acc_dec.entries);
-            // metronome changes
-            self.accept(Some(acc_dec.n), entries, acc_dec.start_idx);
-            self.internal_storage
-                .set_decided_idx(acc_dec.decided_idx)
+            let start_idx = self.internal_storage.get_accepted_idx();
+            let end_idx = start_idx + entries.len();
+            // All acceptors save the state in memory storage so RSM can read decided entries from
+            // log
+            let _ = self
+                .internal_storage
+                .append_entries_without_batching(entries)
                 .expect(WRITE_ERROR_MSG);
-
+            // We signal to RSM to persist entries with an accepted message
+            // TODO: Instead, make an api like get_outgoing_messages but for entries to persist (like etcd?)
+            for slot_idx in start_idx..end_idx {
+                if self.use_metronome == 0 {
+                    self.reply_accepted(acc_dec.n, slot_idx);
+                } else {
+                    let metronome_slot_idx = slot_idx % self.metronome.total_len;
+                    let in_my_critical_order = self
+                        .metronome
+                        .my_critical_ordering
+                        .contains(&metronome_slot_idx);
+                    if in_my_critical_order {
+                        self.reply_accepted(acc_dec.n, slot_idx);
+                    }
+                }
+            }
             /*
             let mut new_accepted_idx = self
                 .internal_storage
