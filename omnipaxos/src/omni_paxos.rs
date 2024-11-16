@@ -8,7 +8,7 @@ use crate::{
         defaults::{BUFFER_SIZE, ELECTION_TIMEOUT, FLUSH_BATCH_TIMEOUT, RESEND_MESSAGE_TIMEOUT},
         ConfigurationId, FlexibleQuorum, LogEntry, LogicalClock, NodeId,
     },
-    utils::{ui, ui::ClusterState},
+    utils::ui::{self, ClusterState},
 };
 #[cfg(any(feature = "toml_config", feature = "serde"))]
 use serde::Deserialize;
@@ -80,6 +80,25 @@ impl OmniPaxosConfig {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+#[cfg_attr(any(feature = "serde", feature = "toml_config"), derive(Deserialize))]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+pub enum MetronomeSetting {
+    #[default]
+    Off,
+    RoundRobin,
+    FastestFollower,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+#[cfg_attr(any(feature = "serde", feature = "toml_config"), derive(Deserialize))]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+pub enum BatchSetting {
+    #[default]
+    Individual,
+    Every(usize),
+    Opportunistic,
+}
+
 /// Configuration for an `OmniPaxos` cluster.
 /// # Fields
 /// * `configuration_id`: The identifier for the cluster configuration that this OmniPaxos server is part of.
@@ -97,7 +116,8 @@ pub struct ClusterConfig {
     pub nodes: Vec<NodeId>,
     /// Defines read and write quorum sizes. Can be used for different latency vs fault tolerance tradeoffs.
     pub flexible_quorum: Option<FlexibleQuorum>,
-    pub use_metronome: usize,
+    pub metronome_setting: MetronomeSetting,
+    pub batch_setting: BatchSetting,
     pub metronome_quorum_size: Option<usize>,
 }
 
@@ -334,8 +354,16 @@ where
         }
     }
 
-    pub fn take_decided_slots_since_last_call(&mut self) -> Vec<usize> {
-        self.seq_paxos.take_decided_slots_since_last_call()
+    pub fn read_raw<'a>(&'a self, idx: usize) -> &'a T {
+        self.seq_paxos
+            .internal_storage
+            .read_raw(idx)
+            .expect("storage error while trying to read log entries")
+    }
+
+    pub fn take_decided_slots_since_last_call(&mut self, decided_slots_buffer: &mut Vec<usize>) {
+        self.seq_paxos
+            .take_decided_slots_since_last_call(decided_slots_buffer);
     }
 
     /// Read entries in the range `r` in the log. Returns `None` if `r` is out of bounds.

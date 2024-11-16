@@ -87,7 +87,6 @@ where
     // The number of promises needed in the prepare phase to become synced and
     // the number of accepteds needed in the accept phase to decide an entry.
     pub quorum: Quorum,
-    pub total_entries: usize,
     pub accepted_per_slot: HashMap<usize, usize>,
 }
 
@@ -106,7 +105,6 @@ where
             batch_accept_meta: vec![None; max_pid],
             max_pid,
             quorum,
-            total_entries: 0,
             accepted_per_slot: HashMap::new(),
         }
     }
@@ -234,7 +232,12 @@ where
         self.batch_accept_meta[Self::pid_to_idx(pid)] = meta;
     }
 
-    pub fn increment_accepted_slot(&mut self, slot_idx: usize) -> bool {
+    pub fn increment_accepted_slot(&mut self, slot_idx: usize) {
+        let count = self.accepted_per_slot.entry(slot_idx).or_insert(0);
+        *count += 1;
+    }
+
+    pub fn increment_accepted_slot_and_check_quorum(&mut self, slot_idx: usize) -> bool {
         let count = self.accepted_per_slot.entry(slot_idx).or_insert(0);
         *count += 1;
         self.quorum.is_accept_quorum(*count)

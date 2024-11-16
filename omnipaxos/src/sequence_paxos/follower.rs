@@ -3,10 +3,7 @@ use crate::sequence_paxos::leader::ACCEPTSYNC_MAGIC_SLOT;
 
 use super::*;
 
-use crate::{
-    storage::metronome::*,
-    util::{MessageStatus, WRITE_ERROR_MSG},
-};
+use crate::util::{MessageStatus, WRITE_ERROR_MSG};
 
 impl<T, B> SequencePaxos<T, B>
 where
@@ -62,7 +59,7 @@ where
     pub(crate) fn handle_acceptsync(&mut self, accsync: AcceptSync<T>, from: NodeId) {
         if self.check_valid_ballot(accsync.n) && self.state == (Role::Follower, Phase::Prepare) {
             self.cached_promise_message = None;
-            let new_accepted_idx = self
+            let _new_accepted_idx = self
                 .internal_storage
                 .sync_log(accsync.n, accsync.decided_idx, Some(accsync.log_sync))
                 .expect(WRITE_ERROR_MSG);
@@ -71,7 +68,7 @@ where
             }
             let accepted = Accepted {
                 n: accsync.n,
-                slot_idx: ACCEPTSYNC_MAGIC_SLOT,
+                accepted_slots: vec![ACCEPTSYNC_MAGIC_SLOT],
             };
             self.state = (Role::Follower, Phase::Accept);
             self.current_seq_num = accsync.seq_num;
@@ -116,35 +113,22 @@ where
                 .append_entries_without_batching(entries)
                 .expect(WRITE_ERROR_MSG);
             // We signal to RSM to persist entries with an accepted message
-            // TODO: Instead, make an api like get_outgoing_messages but for entries to persist (like etcd?)
             for slot_idx in start_idx..end_idx {
-                if self.use_metronome == 0 {
-                    self.reply_accepted(acc_dec.n, slot_idx);
-                } else {
-                    let metronome_slot_idx = slot_idx % self.metronome.total_len;
-                    let in_my_critical_order = self
-                        .metronome
-                        .my_critical_ordering
-                        .contains(&metronome_slot_idx);
-                    if in_my_critical_order {
-                        self.reply_accepted(acc_dec.n, slot_idx);
+                match self.metronome_setting {
+                    MetronomeSetting::Off => self.reply_accepted(acc_dec.n, slot_idx),
+                    MetronomeSetting::RoundRobin => {
+                        let metronome_slot_idx = slot_idx % self.metronome.total_len;
+                        let in_my_critical_order = self
+                            .metronome
+                            .my_critical_ordering
+                            .contains(&metronome_slot_idx);
+                        if in_my_critical_order {
+                            self.reply_accepted(acc_dec.n, slot_idx);
+                        }
                     }
+                    MetronomeSetting::FastestFollower => todo!(),
                 }
             }
-            /*
-            let mut new_accepted_idx = self
-                .internal_storage
-                .append_entries_and_get_accepted_idx(entries)
-                .expect(WRITE_ERROR_MSG);
-            let flushed_after_decide =
-                self.update_decided_idx_and_get_accepted_idx(acc_dec.decided_idx);
-            if flushed_after_decide.is_some() {
-                new_accepted_idx = flushed_after_decide;
-            }
-            if let Some(idx) = new_accepted_idx {
-                self.reply_accepted(acc_dec.n, idx);
-            }
-            */
         }
     }
 
@@ -198,32 +182,62 @@ where
         }
     }
 
-    pub(crate) fn reply_accepted(&mut self, n: Ballot, accepted_idx: usize) {
-        /*
-        match &self.latest_accepted_meta {
-            Some((round, outgoing_idx)) if round == &n => {
-                let PaxosMessage { msg, .. } = self.outgoing.get_mut(*outgoing_idx).unwrap();
-                match msg {
-                    PaxosMsg::Accepted(a) => {
-                        a.slot_idx = accepted_idx;
-                    }
-                    _ => panic!("Cached idx is not an Accepted Message<T>!"),
+    pub(crate) fn reply_accepted(&mut self, n: Ballot, slot_idx: usize) {
+        match self.batch_setting {
+            BatchSetting::Individual => {
+                let accepted = Accepted {
+                    n,
+                    accepted_slots: vec![slot_idx],
+                };
+                self.outgoing.push(PaxosMessage {
+                    from: self.pid,
+                    to: n.pid,
+                    msg: PaxosMsg::Accepted(accepted),
+                });
+            }
+            BatchSetting::Every(batch_size) => {
+                self.accepted_slots_cache.push(slot_idx);
+                if self.accepted_slots_cache.len() >= batch_size {
+                    let mut ready_slots = Vec::with_capacity(batch_size);
+                    std::mem::swap(&mut self.accepted_slots_cache, &mut ready_slots);
+                    let accepted = Accepted {
+                        n,
+                        accepted_slots: ready_slots,
+                    };
+                    self.outgoing.push(PaxosMessage {
+                        from: self.pid,
+                        to: n.pid,
+                        msg: PaxosMsg::Accepted(accepted),
+                    });
                 }
             }
-            _ => {
-
+            BatchSetting::Opportunistic => {
+                match &self.latest_accepted_meta {
+                    Some((round, outgoing_idx)) if round == &n => {
+                        let PaxosMessage { msg, .. } =
+                            self.outgoing.get_mut(*outgoing_idx).unwrap();
+                        match msg {
+                            PaxosMsg::Accepted(a) => a.accepted_slots.push(slot_idx),
+                            _ => panic!("Cached idx is not an Accepted Message<T>!"),
+                        }
+                    }
+                    _ => {
+                        self.latest_accepted_meta = Some((n, self.outgoing.len()));
+                        let mut init_accepted_vec = Vec::with_capacity(1000);
+                        init_accepted_vec.push(slot_idx);
+                        let accepted = Accepted {
+                            n,
+                            accepted_slots: init_accepted_vec,
+                        };
+                        self.outgoing.push(PaxosMessage {
+                            from: self.pid,
+                            to: n.pid,
+                            msg: PaxosMsg::Accepted(accepted),
+                        });
+                    }
+                };
             }
-        };
-        */
-        let accepted = Accepted {
-            n,
-            slot_idx: accepted_idx,
-        };
-        self.outgoing.push(PaxosMessage {
-            from: self.pid,
-            to: n.pid,
-            msg: PaxosMsg::Accepted(accepted),
-        });
+        }
     }
 
     /// Also returns whether the message's ballot was promised

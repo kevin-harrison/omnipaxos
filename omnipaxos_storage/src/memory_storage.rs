@@ -95,6 +95,10 @@ where
         Ok(self.log.get(from..to).unwrap_or(&[]).to_vec())
     }
 
+    fn get_entry<'a>(&'a self, idx: usize) -> StorageResult<&'a T> {
+        Ok(self.log.get(idx).unwrap())
+    }
+
     fn get_log_len(&self) -> StorageResult<usize> {
         Ok(self.log.len())
     }
@@ -142,6 +146,16 @@ where
 
     fn get_snapshot(&self) -> StorageResult<Option<T::Snapshot>> {
         Ok(self.snapshot.clone())
+    }
+}
+
+impl<T: Entry> MemoryStorage<T> {
+    /// Create log with inital capacity
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            log: Vec::with_capacity(capacity),
+            ..Default::default()
+        }
     }
 }
 

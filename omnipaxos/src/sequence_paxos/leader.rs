@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use super::super::{
     ballot_leader_election::Ballot,
     util::{LeaderState, PromiseMetaData},
@@ -111,51 +113,17 @@ where
     }
 
     pub(crate) fn accept_entry_leader(&mut self, entry: T) {
-        // Append to storage
         let slot_idx = self
             .internal_storage
             .append_entry_no_batching(entry.clone())
             .expect(WRITE_ERROR_MSG)
             - 1;
-        // Update leader_state accepted slot
-        let new_num_accepted = self
-            .leader_state
-            .accepted_per_slot
-            .get(&slot_idx)
-            .copied()
-            .unwrap_or_default()
-            + 1;
-        self.leader_state
-            .accepted_per_slot
-            .insert(slot_idx, new_num_accepted);
-        // Send AcceptDecide
-        self.send_single_acceptdecide(slot_idx, entry);
+        self.leader_state.increment_accepted_slot(slot_idx);
+        self.send_acceptdecide(slot_idx, entry);
     }
 
     pub(crate) fn accept_entries_leader(&mut self, entries: Vec<T>) {
-        // Append to storage
-        let start_idx = self.internal_storage.get_accepted_idx();
-        let end_idx = start_idx + entries.len();
-        let _ = self
-            .internal_storage
-            .append_entries_without_batching(entries.clone())
-            .expect(WRITE_ERROR_MSG)
-            - 1;
-        // Update leader_state accepted slot
-        for slot_idx in start_idx..end_idx {
-            let new_num_accepted = self
-                .leader_state
-                .accepted_per_slot
-                .get(&slot_idx)
-                .copied()
-                .unwrap_or_default()
-                + 1;
-            self.leader_state
-                .accepted_per_slot
-                .insert(slot_idx, new_num_accepted);
-        }
-        // Send AcceptDecide
-        self.send_acceptdecide(start_idx, entries);
+        unimplemented!("Metronome doesn't use forwarding to leader");
     }
 
     pub(crate) fn accept_stopsign_leader(&mut self, ss: StopSign) {
@@ -219,49 +187,7 @@ where
         self.outgoing.push(msg);
     }
 
-    fn send_acceptdecide(&mut self, start_idx: usize, entries: Vec<T>) {
-        let decided_idx = self.internal_storage.get_decided_idx();
-        for pid in self.leader_state.get_promised_followers() {
-            let cached_acceptdecide = match self.leader_state.get_batch_accept_meta(pid) {
-                Some((bal, msg_idx)) if bal == self.leader_state.n_leader => {
-                    let PaxosMessage { msg, .. } = self.outgoing.get_mut(msg_idx).unwrap();
-                    match msg {
-                        PaxosMsg::AcceptDecide(acc) => Some(acc),
-                        _ => panic!("Cached index is not an AcceptDecide!"),
-                    }
-                }
-                _ => None,
-            };
-            match cached_acceptdecide {
-                // Modify existing AcceptDecide message to follower
-                Some(acc) => {
-                    acc.entries.extend(entries.iter().cloned());
-                    acc.decided_idx = decided_idx;
-                }
-                // Add new AcceptDecide message to follower
-                None => {
-                    self.leader_state
-                        .set_batch_accept_meta(pid, Some(self.outgoing.len()));
-                    let acc = AcceptDecide {
-                        n: self.leader_state.n_leader,
-                        seq_num: self.leader_state.next_seq_num(pid),
-                        decided_idx,
-                        start_idx,
-                        entries: entries.clone(),
-                    };
-                    self.outgoing.push(PaxosMessage {
-                        from: self.pid,
-                        to: pid,
-                        msg: PaxosMsg::AcceptDecide(acc),
-                    });
-                }
-            }
-        }
-    }
-
-    // Code duplication, but removes an allocation on the hot path since we often append single
-    // entries
-    fn send_single_acceptdecide(&mut self, start_idx: usize, entry: T) {
+    fn send_acceptdecide(&mut self, start_idx: usize, entry: T) {
         let decided_idx = self.internal_storage.get_decided_idx();
         for pid in self.leader_state.get_promised_followers() {
             let cached_acceptdecide = match self.leader_state.get_batch_accept_meta(pid) {
@@ -407,51 +333,43 @@ where
         }
     }
 
-    pub(crate) fn handle_accepted(&mut self, accepted: Accepted, from: NodeId) {
+    pub(crate) fn handle_accepted(&mut self, accepted: Accepted, _from: NodeId) {
         if accepted.n == self.leader_state.n_leader && self.state == (Role::Leader, Phase::Accept) {
-            if accepted.slot_idx == ACCEPTSYNC_MAGIC_SLOT {
-                return;
-            }
-            /*
-            #[cfg(feature = "logging")]
-            info!(
-                self.logger,
-                "slot_idx: {} accepted by {}, decided_idx: {}",
-                accepted.slot_idx,
-                from,
-                self.internal_storage.get_decided_idx(),
-                // self.leader_state.accepted_indexes
-            );
-            */
-            let slot_is_decided = self.leader_state.increment_accepted_slot(accepted.slot_idx);
-            if slot_is_decided {
-                // #[cfg(feature = "logging")]
-                // info!(self.logger, "------------- Slot {} is decided", accepted.slot_idx);
-                self.add_decided_slot(accepted.slot_idx);
-                self.leader_state
-                    .accepted_per_slot
-                    .remove(&accepted.slot_idx);
-
-                let current_decided_idx = self.internal_storage.get_decided_idx();
-                if accepted.slot_idx > current_decided_idx {
-                    self.internal_storage
-                        .set_decided_idx(accepted.slot_idx)
-                        .expect(WRITE_ERROR_MSG);
-                    // for pid in self.leader_state.get_promised_followers() {
-                    //     match self.leader_state.get_batch_accept_meta(pid) {
-                    //         Some((bal, msg_idx)) if bal == self.leader_state.n_leader => {
-                    //             let PaxosMessage { msg, .. } =
-                    //                 self.outgoing.get_mut(msg_idx).unwrap();
-                    //             match msg {
-                    //                 PaxosMsg::AcceptDecide(acc) => {
-                    //                     acc.decided_idx = accepted.slot_idx
-                    //                 }
-                    //                 _ => panic!("Cached index is not an AcceptDecide!"),
-                    //             }
-                    //         }
-                    //         _ => self.send_decide(pid, accepted.slot_idx, false),
-                    //     };
-                    // }
+            let skip_accsync = if accepted.accepted_slots[0] == ACCEPTSYNC_MAGIC_SLOT {
+                1
+            } else {
+                0
+            };
+            let accepted_iter = accepted.accepted_slots.into_iter().skip(skip_accsync);
+            for accepted_slot in accepted_iter {
+                let slot_is_decided = self
+                    .leader_state
+                    .increment_accepted_slot_and_check_quorum(accepted_slot);
+                if slot_is_decided {
+                    self.add_decided_slot(accepted_slot);
+                    self.leader_state.accepted_per_slot.remove(&accepted_slot);
+                    let new_decided_idx = accepted_slot + 1;
+                    let current_decided_idx = self.internal_storage.get_decided_idx();
+                    if new_decided_idx > current_decided_idx {
+                        self.internal_storage
+                            .set_decided_idx(new_decided_idx)
+                            .expect(WRITE_ERROR_MSG);
+                        // for pid in self.leader_state.get_promised_followers() {
+                        //     match self.leader_state.get_batch_accept_meta(pid) {
+                        //         Some((bal, msg_idx)) if bal == self.leader_state.n_leader => {
+                        //             let PaxosMessage { msg, .. } =
+                        //                 self.outgoing.get_mut(msg_idx).unwrap();
+                        //             match msg {
+                        //                 PaxosMsg::AcceptDecide(acc) => {
+                        //                     acc.decided_idx = accepted.slot_idx
+                        //                 }
+                        //                 _ => panic!("Cached index is not an AcceptDecide!"),
+                        //             }
+                        //         }
+                        //         _ => self.send_decide(pid, accepted.slot_idx, false),
+                        //     };
+                        // }
+                    }
                 }
             }
         }

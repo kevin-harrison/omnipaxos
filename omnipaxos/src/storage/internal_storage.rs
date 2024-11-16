@@ -86,6 +86,10 @@ where
         }
     }
 
+    pub(crate) fn read_raw<'a>(&'a self, idx: usize) -> StorageResult<&'a T> {
+        self.storage.get_entry(idx)
+    }
+
     /// Read entries in the range `r` in the log. Returns `None` if `r` is out of bounds.
     pub(crate) fn read<R>(&self, r: R) -> StorageResult<Option<Vec<LogEntry<T>>>>
     where

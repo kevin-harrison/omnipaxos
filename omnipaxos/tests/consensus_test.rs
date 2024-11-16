@@ -35,9 +35,10 @@ fn consensus_test() {
     std::thread::sleep(cfg.wait_timeout);
 
     let mut log = vec![];
+    let mut slots = Vec::with_capacity(100);
     for (pid, node) in sys.nodes {
         log.push(node.on_definition(|x| {
-            let slots = x.paxos.take_decided_slots_since_last_call();
+            x.paxos.take_decided_slots_since_last_call(&mut slots);
             println!("Node {pid}: Decided slots: {:?}", slots.len());
             let log = x.read_decided_log();
             (pid, log)

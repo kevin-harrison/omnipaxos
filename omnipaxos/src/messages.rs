@@ -6,6 +6,8 @@ use crate::{
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
+use self::sequence_paxos::PaxosMsg;
+
 /// Internal component for log replication
 pub mod sequence_paxos {
     use crate::{
@@ -104,13 +106,13 @@ pub mod sequence_paxos {
     }
 
     /// Message sent by follower to leader when entries has been accepted.
-    #[derive(Copy, Clone, Debug)]
+    #[derive(Clone, Debug)]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
     pub struct Accepted {
         /// The current round.
         pub n: Ballot,
-        /// The accepted index.
-        pub slot_idx: usize,
+        /// The accepted indices.
+        pub accepted_slots: Vec<usize>,
     }
 
     /// Message sent by leader to followers to decide up to a certain index in the log.
@@ -276,6 +278,19 @@ where
         match self {
             Message::SequencePaxos(p) => p.to,
             Message::BLE(b) => b.to,
+        }
+    }
+
+    pub fn get_accepted_slots<'a>(&'a self) -> Option<&Vec<usize>> {
+        if let Message::SequencePaxos(PaxosMessage {
+            from: _,
+            to: _,
+            msg: PaxosMsg::Accepted(acc),
+        }) = self
+        {
+            Some(&acc.accepted_slots)
+        } else {
+            None
         }
     }
 }

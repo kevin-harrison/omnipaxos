@@ -8,9 +8,10 @@ use crate::{
         Entry, Snapshot, StopSign, Storage,
     },
     util::{
-        FlexibleQuorum, LogSync, NodeId, Quorum, SequenceNumber, READ_ERROR_MSG, WRITE_ERROR_MSG,
+        defaults, FlexibleQuorum, LogSync, NodeId, Quorum, SequenceNumber, READ_ERROR_MSG,
+        WRITE_ERROR_MSG,
     },
-    ClusterConfig, CompactionErr, OmniPaxosConfig, ProposeErr,
+    BatchSetting, ClusterConfig, CompactionErr, MetronomeSetting, OmniPaxosConfig, ProposeErr,
 };
 #[cfg(feature = "logging")]
 use slog::{debug, info, trace, warn, Logger};
@@ -43,7 +44,9 @@ where
     cached_promise_message: Option<Promise<T>>,
     buffer_size: usize,
     metronome: Metronome,
-    use_metronome: usize,
+    metronome_setting: MetronomeSetting,
+    batch_setting: BatchSetting,
+    accepted_slots_cache: Vec<usize>,
     decided_slots_since_last_call: Vec<usize>, // TODO fix this for followers, currently only leader keeps track of this.
     #[cfg(feature = "logging")]
     logger: Logger,
@@ -88,15 +91,7 @@ where
             None => quorum.get_write_quorum_size(),
         };
         let metronome = Metronome::with(pid, num_nodes, metronome_quorum_size);
-        let my_ordering = metronome.my_critical_ordering.clone();
-        // batch at least as large as metronome ordering size to prevent out of index for an entry.
-        let critical_len = metronome.critical_len;
-        let total_len = metronome.total_len;
-        let batch_size = if config.batch_size == 0 {
-            critical_len
-        } else {
-            config.batch_size
-        };
+        let batch_size = 1; // not used
         let internal_storage_config = InternalStorageConfig { batch_size };
         let mut paxos = SequencePaxos {
             internal_storage: InternalStorage::with(
@@ -116,7 +111,9 @@ where
             current_seq_num: SequenceNumber::default(),
             cached_promise_message: None,
             buffer_size: config.buffer_size,
-            use_metronome: config.use_metronome,
+            metronome_setting: config.metronome_setting,
+            batch_setting: config.batch_setting,
+            accepted_slots_cache: Vec::new(),
             metronome,
             decided_slots_since_last_call: Vec::with_capacity(1000),
             #[cfg(feature = "logging")]
@@ -167,8 +164,11 @@ where
         self.decided_slots_since_last_call.push(slot_idx);
     }
 
-    pub fn take_decided_slots_since_last_call(&mut self) -> Vec<usize> {
-        std::mem::take(&mut self.decided_slots_since_last_call)
+    pub fn take_decided_slots_since_last_call(&mut self, decided_slots_buffer: &mut Vec<usize>) {
+        std::mem::swap(
+            &mut self.decided_slots_since_last_call,
+            decided_slots_buffer,
+        );
     }
 
     /// Initiates the trim process.
@@ -306,7 +306,7 @@ where
             PaxosMsg::AcceptSync(acc_sync) => self.handle_acceptsync(acc_sync, m.from),
             PaxosMsg::AcceptDecide(acc) => self.handle_acceptdecide(acc),
             PaxosMsg::NotAccepted(not_acc) => self.handle_notaccepted(not_acc, m.from),
-            PaxosMsg::Accepted(accepted) => self.handle_accepted(accepted, m.from),
+            PaxosMsg::Accepted(acc) => self.handle_accepted(acc, m.from),
             PaxosMsg::Decide(d) => self.handle_decide(d),
             PaxosMsg::ProposalForward(proposals) => self.handle_forwarded_proposal(proposals),
             PaxosMsg::Compaction(c) => self.handle_compaction(c),
@@ -497,7 +497,8 @@ pub(crate) struct SequencePaxosConfig {
     pid: NodeId,
     peers: Vec<NodeId>,
     buffer_size: usize,
-    use_metronome: usize,
+    metronome_setting: MetronomeSetting,
+    batch_setting: BatchSetting,
     pub(crate) batch_size: usize,
     flexible_quorum: Option<FlexibleQuorum>,
     metronome_quorum_size: Option<usize>,
@@ -522,7 +523,8 @@ impl From<OmniPaxosConfig> for SequencePaxosConfig {
             flexible_quorum: config.cluster_config.flexible_quorum,
             buffer_size: config.server_config.buffer_size,
             batch_size: config.server_config.batch_size,
-            use_metronome: config.cluster_config.use_metronome,
+            metronome_setting: config.cluster_config.metronome_setting,
+            batch_setting: config.cluster_config.batch_setting,
             metronome_quorum_size: config.cluster_config.metronome_quorum_size,
             #[cfg(feature = "logging")]
             logger_file_path: config.server_config.logger_file_path,
