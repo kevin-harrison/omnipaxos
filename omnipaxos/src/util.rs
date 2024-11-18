@@ -5,7 +5,7 @@ use super::{
 };
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
-use std::{cmp::Ordering, collections::HashMap, fmt::Debug, marker::PhantomData};
+use std::{cmp::Ordering, collections::HashMap, fmt::Debug, marker::PhantomData, usize};
 
 /// Struct used to help another server synchronize their log with the current state of our own log.
 #[derive(Clone, Debug)]
@@ -77,6 +77,8 @@ where
 {
     pub n_leader: Ballot,
     promises_meta: Vec<PromiseState>,
+    pub promised_followers: Vec<NodeId>,
+    pub follower_pending_accepts: Vec<usize>,
     // the sequence number of accepts for each follower where AcceptSync has sequence number = 1
     follower_seq_nums: Vec<SequenceNumber>,
     // pub accepted_indexes: Vec<usize>,
@@ -98,6 +100,8 @@ where
         Self {
             n_leader,
             promises_meta: vec![PromiseState::NotPromised; max_pid],
+            promised_followers: Vec::new(),
+            follower_pending_accepts: vec![0; max_pid + 1],
             follower_seq_nums: vec![SequenceNumber::default(); max_pid],
             // accepted_indexes: vec![0; max_pid],
             max_promise_meta: PromiseMetaData::default(),
@@ -142,6 +146,9 @@ where
             self.max_promise_sync = prom.log_sync;
         }
         self.promises_meta[Self::pid_to_idx(from)] = PromiseState::Promised(promise_meta);
+        if from != self.n_leader.pid {
+            self.promised_followers.push(from);
+        }
         let num_promised = self
             .promises_meta
             .iter()
@@ -153,11 +160,23 @@ where
     }
 
     pub fn reset_promise(&mut self, pid: NodeId) {
+        let idx = self
+            .promised_followers
+            .iter()
+            .position(|f| *f == pid)
+            .unwrap();
+        self.promised_followers.remove(idx);
         self.promises_meta[Self::pid_to_idx(pid)] = PromiseState::NotPromised;
     }
 
     /// Node `pid` seen with ballot greater than my ballot
     pub fn lost_promise(&mut self, pid: NodeId) {
+        let idx = self
+            .promised_followers
+            .iter()
+            .position(|f| *f == pid)
+            .unwrap();
+        self.promised_followers.remove(idx);
         self.promises_meta[Self::pid_to_idx(pid)] = PromiseState::PromisedHigher;
     }
 
@@ -243,11 +262,80 @@ where
         self.quorum.is_accept_quorum(*count)
     }
 
-    /*
-    pub fn set_accepted_idx(&mut self, pid: NodeId, idx: usize) {
-        self.accepted_indexes[Self::pid_to_idx(pid)] = idx;
+    pub fn get_fastest_flush_quorum(&self) -> Vec<NodeId> {
+        self.promised_followers[..self.quorum.get_write_quorum_size() - 1].to_vec()
     }
-    */
+
+    pub fn get_followers_after_fastest_quorum(&self) -> Vec<NodeId> {
+        self.promised_followers[self.quorum.get_write_quorum_size() - 1..].to_vec()
+    }
+
+    pub fn increment_fastest_flush_quorum(&mut self) {
+        let quorum_size = self.quorum.get_write_quorum_size() - 1;
+        for idx in (0..quorum_size).rev() {
+            self.increment_pending_accepts(self.promised_followers[idx])
+        }
+    }
+
+    // Increments the pending accepts of follower pid. Adjusts self.promised_followers so that the
+    // order of the followers matches the order of the follower's pending accepts.
+    fn increment_pending_accepts(&mut self, pid: NodeId) {
+        // Increment pending accept
+        self.follower_pending_accepts[pid as usize] += 1;
+        let nodes_pending = self.follower_pending_accepts[pid as usize];
+        // Find current position in promised_followers
+        let mut curr_idx = 0;
+        while self.promised_followers[curr_idx] != pid {
+            curr_idx += 1;
+        }
+        // Swap elements of promised_followers so that they retain order based on pending accepts
+        let mut next_idx = curr_idx + 1;
+        while next_idx < self.promised_followers.len() {
+            let next_node = self.promised_followers[next_idx];
+            let next_nodes_pending = self.follower_pending_accepts[next_node as usize];
+            if next_nodes_pending < nodes_pending {
+                self.promised_followers[curr_idx] = next_node;
+                self.promised_followers[next_idx] = pid;
+            } else {
+                break;
+            }
+            curr_idx += 1;
+            next_idx += 1;
+        }
+    }
+
+    // Decrements the pending accepts of follower pid. Adjusts self.promised_followers so that the
+    // order of the followers matches the order of the follower's pending accepts.
+    pub fn decrement_pending_accepts(&mut self, pid: NodeId, amount: usize) {
+        // Decrement pending accept
+        self.follower_pending_accepts[pid as usize] -= amount;
+        let nodes_pending = self.follower_pending_accepts[pid as usize];
+        // Find current position in promised_followers
+        let mut curr_idx = 0;
+        while self.promised_followers[curr_idx] != pid {
+            curr_idx += 1;
+        }
+        if curr_idx == 0 {
+            return;
+        }
+        // Swap elements of promised_followers so that they retain order based on pending accepts
+        let mut prev_idx = curr_idx - 1;
+        loop {
+            let prev_node = self.promised_followers[prev_idx];
+            let prev_nodes_pending = self.follower_pending_accepts[prev_node as usize];
+            if prev_nodes_pending > nodes_pending {
+                self.promised_followers[curr_idx] = prev_node;
+                self.promised_followers[prev_idx] = pid;
+            } else {
+                break;
+            }
+            if curr_idx == 1 {
+                break;
+            }
+            curr_idx -= 1;
+            prev_idx -= 1;
+        }
+    }
 
     pub fn get_batch_accept_meta(&self, pid: NodeId) -> Option<(Ballot, usize)> {
         self.batch_accept_meta

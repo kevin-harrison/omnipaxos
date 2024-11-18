@@ -87,6 +87,7 @@ pub enum MetronomeSetting {
     #[default]
     Off,
     RoundRobin,
+    RoundRobin2,
     FastestFollower,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Default)]

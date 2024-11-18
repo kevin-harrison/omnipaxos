@@ -100,6 +100,8 @@ pub mod sequence_paxos {
         #[cfg(not(feature = "unicache"))]
         /// Entries to be replicated.
         pub entries: Vec<T>,
+        /// Entries to be flushed
+        pub flush_mask: Option<Vec<bool>>,
         #[cfg(feature = "unicache")]
         /// Entries to be replicated.
         pub entries: Vec<T::EncodeResult>,

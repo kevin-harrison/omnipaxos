@@ -4,7 +4,8 @@ use crate::utils::logger::create_logger;
 use crate::{
     storage::{
         internal_storage::{InternalStorage, InternalStorageConfig},
-        metronome::{Metronome, BATCH_ACCEPTED},
+        metronome::Metronome,
+        metronome2::Metronome as Metronome2,
         Entry, Snapshot, StopSign, Storage,
     },
     util::{
@@ -16,8 +17,6 @@ use crate::{
 #[cfg(feature = "logging")]
 use slog::{debug, info, trace, warn, Logger};
 use std::{cmp, fmt::Debug, vec};
-
-const METRONOME_WORKSTEALING: usize = 2;
 
 pub mod follower;
 pub mod leader;
@@ -44,6 +43,7 @@ where
     cached_promise_message: Option<Promise<T>>,
     buffer_size: usize,
     metronome: Metronome,
+    metronome2: Metronome2,
     metronome_setting: MetronomeSetting,
     batch_setting: BatchSetting,
     accepted_slots_cache: Vec<usize>,
@@ -91,6 +91,7 @@ where
             None => quorum.get_write_quorum_size(),
         };
         let metronome = Metronome::with(pid, num_nodes, metronome_quorum_size);
+        let metronome2 = Metronome2::with(pid, num_nodes, metronome_quorum_size);
         let batch_size = 1; // not used
         let internal_storage_config = InternalStorageConfig { batch_size };
         let mut paxos = SequencePaxos {
@@ -115,6 +116,7 @@ where
             batch_setting: config.batch_setting,
             accepted_slots_cache: Vec::new(),
             metronome,
+            metronome2,
             decided_slots_since_last_call: Vec::with_capacity(1000),
             #[cfg(feature = "logging")]
             logger: {

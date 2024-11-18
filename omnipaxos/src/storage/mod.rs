@@ -1,5 +1,6 @@
 pub(crate) mod internal_storage;
 pub mod metronome;
+pub mod metronome2;
 mod state_cache;
 
 use super::ballot_leader_election::Ballot;

@@ -126,7 +126,23 @@ where
                             self.reply_accepted(acc_dec.n, slot_idx);
                         }
                     }
-                    MetronomeSetting::FastestFollower => todo!(),
+                    MetronomeSetting::RoundRobin2 => {
+                        let metronome_slot_idx = slot_idx % self.metronome2.total_len;
+                        let in_my_critical_order = self
+                            .metronome2
+                            .my_critical_ordering
+                            .contains(&metronome_slot_idx);
+                        if in_my_critical_order {
+                            self.reply_accepted(acc_dec.n, slot_idx);
+                        }
+                    }
+                    MetronomeSetting::FastestFollower => {
+                        let should_flush =
+                            acc_dec.flush_mask.as_ref().unwrap()[slot_idx - start_idx];
+                        if should_flush {
+                            self.reply_accepted(acc_dec.n, slot_idx);
+                        }
+                    }
                 }
             }
         }
