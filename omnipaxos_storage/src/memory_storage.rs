@@ -96,7 +96,7 @@ where
     }
 
     fn get_entry<'a>(&'a self, idx: usize) -> StorageResult<&'a T> {
-        Ok(self.log.get(idx).unwrap())
+        Ok(self.log.get(idx - self.trimmed_idx).unwrap())
     }
 
     fn get_log_len(&self) -> StorageResult<usize> {
