@@ -295,4 +295,17 @@ where
             None
         }
     }
+
+    pub fn should_persist_before_send(&self) -> bool {
+        if let Message::SequencePaxos(PaxosMessage {
+            from: _,
+            to: _,
+            msg: PaxosMsg::Accepted(_),
+        }) = self
+        {
+            true
+        } else {
+            false
+        }
+    }
 }
