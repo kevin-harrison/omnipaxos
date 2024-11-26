@@ -1,7 +1,6 @@
-use super::super::{
-    ballot_leader_election::Ballot,
-    util::{LeaderState, PromiseMetaData},
-};
+use std::time::{Duration, Instant};
+
+use super::super::{ballot_leader_election::Ballot, util::PromiseMetaData};
 use crate::util::WRITE_ERROR_MSG;
 
 use super::*;
@@ -22,8 +21,7 @@ where
         #[cfg(feature = "logging")]
         debug!(self.logger, "Newly elected leader: {:?}", n);
         if self.pid == n.pid {
-            self.leader_state =
-                LeaderState::with(n, self.leader_state.max_pid, self.leader_state.quorum);
+            self.leader_state.reset_with_new_ballot(n);
             // Flush any pending writes
             // Don't have to handle flushed entries here because we will sync with followers
             let _ = self.internal_storage.flush_batch().expect(WRITE_ERROR_MSG);
@@ -116,7 +114,29 @@ where
             .append_entry_no_batching(entry.clone())
             .expect(WRITE_ERROR_MSG)
             - 1;
-        self.leader_state.increment_accepted_slot(slot_idx);
+        match self.metronome_setting {
+            MetronomeSetting::RoundRobin => {
+                let metronome_slot_idx = slot_idx % self.metronome.total_len;
+                if self
+                    .metronome
+                    .my_critical_ordering
+                    .contains(&metronome_slot_idx)
+                {
+                    self.leader_state.increment_accepted_slot(slot_idx);
+                }
+            }
+            MetronomeSetting::RoundRobin2 => {
+                let metronome_slot_idx = slot_idx % self.metronome.total_len;
+                if self
+                    .metronome2
+                    .my_critical_ordering
+                    .contains(&metronome_slot_idx)
+                {
+                    self.leader_state.increment_accepted_slot(slot_idx);
+                }
+            }
+            _ => self.leader_state.increment_accepted_slot(slot_idx),
+        }
         match self.metronome_setting {
             MetronomeSetting::FastestFollower => {
                 let fastest_quorum = self.leader_state.get_fastest_flush_quorum();
@@ -126,8 +146,8 @@ where
                     fastest_quorum,
                     true,
                 );
-                let rest = self.leader_state.get_followers_after_fastest_quorum();
-                self.send_acceptdecide_with_flush_mask(slot_idx, entry, rest, false);
+                let remaining_followers = self.leader_state.get_followers_after_fastest_quorum();
+                self.send_acceptdecide_with_flush_mask(slot_idx, entry, remaining_followers, false);
                 self.leader_state.increment_fastest_flush_quorum();
             }
             _ => {
@@ -415,12 +435,9 @@ where
                 if accepted_slot == ACCEPTSYNC_MAGIC_SLOT {
                     continue;
                 }
-                let slot_is_decided = self
-                    .leader_state
-                    .increment_accepted_slot_and_check_quorum(accepted_slot);
-                if slot_is_decided {
+                let slot_is_newly_decided = self.leader_state.handle_accepted_slot(accepted_slot);
+                if slot_is_newly_decided {
                     self.add_decided_slot(accepted_slot);
-                    self.leader_state.accepted_per_slot.remove(&accepted_slot);
                     let new_decided_idx = accepted_slot + 1;
                     let current_decided_idx = self.internal_storage.get_decided_idx();
                     if new_decided_idx > current_decided_idx {

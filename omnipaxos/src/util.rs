@@ -1,3 +1,5 @@
+use crate::MetronomeSetting;
+
 use super::{
     ballot_leader_election::Ballot,
     messages::sequence_paxos::Promise,
@@ -76,6 +78,9 @@ where
     T: Entry,
 {
     pub n_leader: Ballot,
+    num_nodes: usize,
+    metronome_setting: MetronomeSetting,
+    metronome_quorum_size: usize,
     promises_meta: Vec<PromiseState>,
     pub promised_followers: Vec<NodeId>,
     pub follower_pending_accepts: Vec<usize>,
@@ -85,10 +90,10 @@ where
     max_promise_meta: PromiseMetaData,
     max_promise_sync: Option<LogSync<T>>,
     batch_accept_meta: Vec<Option<(Ballot, usize)>>, //  index in outgoing
-    pub max_pid: usize,
+    max_pid: usize,
     // The number of promises needed in the prepare phase to become synced and
     // the number of accepteds needed in the accept phase to decide an entry.
-    pub quorum: Quorum,
+    quorum: Quorum,
     pub accepted_per_slot: HashMap<usize, usize>,
 }
 
@@ -96,9 +101,19 @@ impl<T> LeaderState<T>
 where
     T: Entry,
 {
-    pub fn with(n_leader: Ballot, max_pid: usize, quorum: Quorum) -> Self {
+    pub fn new(
+        n_leader: Ballot,
+        num_nodes: usize,
+        max_pid: usize,
+        quorum: Quorum,
+        metronome_setting: MetronomeSetting,
+        metronome_quorum_size: usize,
+    ) -> Self {
         Self {
             n_leader,
+            num_nodes,
+            metronome_setting,
+            metronome_quorum_size,
             promises_meta: vec![PromiseState::NotPromised; max_pid],
             promised_followers: Vec::new(),
             follower_pending_accepts: vec![0; max_pid + 1],
@@ -111,6 +126,26 @@ where
             quorum,
             accepted_per_slot: HashMap::new(),
         }
+    }
+
+    pub fn reset_with_new_ballot(&mut self, new_ballot: Ballot) {
+        self.n_leader = new_ballot;
+        for promise_state in self.promises_meta.iter_mut() {
+            *promise_state = PromiseState::NotPromised;
+        }
+        self.promised_followers.clear();
+        for pending_accept in self.follower_pending_accepts.iter_mut() {
+            *pending_accept = 0;
+        }
+        for seq_num in self.follower_seq_nums.iter_mut() {
+            *seq_num = SequenceNumber::default();
+        }
+        self.max_promise_meta = PromiseMetaData::default();
+        self.max_promise_sync = None;
+        for metadata in self.batch_accept_meta.iter_mut() {
+            *metadata = None;
+        }
+        self.accepted_per_slot.clear();
     }
 
     fn pid_to_idx(pid: NodeId) -> usize {
@@ -252,14 +287,28 @@ where
     }
 
     pub fn increment_accepted_slot(&mut self, slot_idx: usize) {
-        let count = self.accepted_per_slot.entry(slot_idx).or_insert(0);
-        *count += 1;
+        self.accepted_per_slot
+            .entry(slot_idx)
+            .and_modify(|accepted_count| *accepted_count += 1)
+            .or_insert(1);
     }
 
-    pub fn increment_accepted_slot_and_check_quorum(&mut self, slot_idx: usize) -> bool {
-        let count = self.accepted_per_slot.entry(slot_idx).or_insert(0);
-        *count += 1;
-        self.quorum.is_accept_quorum(*count)
+    // Increments accepted data and returns whether or not the slot index is newly decided
+    pub fn handle_accepted_slot(&mut self, slot_idx: usize) -> bool {
+        let accepted_count = self
+            .accepted_per_slot
+            .entry(slot_idx)
+            .and_modify(|accepted_count| *accepted_count += 1)
+            .or_insert(1);
+        let is_newly_decided = self.quorum.is_exact_accept_quorum(*accepted_count);
+        let last_accepted = match self.metronome_setting {
+            MetronomeSetting::Off => *accepted_count == self.num_nodes,
+            _ => *accepted_count == self.metronome_quorum_size,
+        };
+        if last_accepted {
+            self.accepted_per_slot.remove(&slot_idx);
+        }
+        return is_newly_decided;
     }
 
     pub fn get_fastest_flush_quorum(&self) -> Vec<NodeId> {
@@ -567,6 +616,13 @@ impl Quorum {
         match self {
             Quorum::Majority(majority) => num_nodes >= *majority,
             Quorum::Flexible(flex_quorum) => num_nodes >= flex_quorum.write_quorum_size,
+        }
+    }
+
+    pub(crate) fn is_exact_accept_quorum(&self, num_nodes: usize) -> bool {
+        match self {
+            Quorum::Majority(majority) => num_nodes == *majority,
+            Quorum::Flexible(flex_quorum) => num_nodes == flex_quorum.write_quorum_size,
         }
     }
 
