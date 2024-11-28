@@ -164,6 +164,10 @@ where
         self.internal_storage.get_leader()
     }
 
+    pub(crate) fn is_accept_phase_leader(&self) -> bool {
+        self.get_promise().pid == self.pid && self.state == (Role::Leader, Phase::Accept)
+    }
+
     pub(crate) fn get_quorum(&self) -> Quorum {
         self.internal_storage.get_quorum()
     }
