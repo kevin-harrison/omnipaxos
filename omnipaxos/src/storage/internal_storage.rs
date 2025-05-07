@@ -7,6 +7,7 @@ use crate::{
 };
 #[cfg(feature = "unicache")]
 use crate::{unicache::*, util::NodeId};
+use core::panic;
 use std::{
     cmp::Ordering,
     marker::PhantomData,
@@ -543,6 +544,17 @@ where
         self.state_cache.stopsign = ss.clone();
         self.storage.set_stopsign(ss)?;
         Ok(self.state_cache.accepted_idx)
+    }
+
+    pub(crate) fn remove_decided_stopsign(&mut self) -> Option<StopSign> {
+        if !self.stopsign_is_decided() {
+            panic!("Decided stopsign doesn't exist");
+        }
+        let decided_idx = self.get_decided_idx_without_stopsign();
+        self.set_decided_idx(decided_idx).unwrap();
+        self.state_cache.accepted_idx -= 1;
+        self.storage.set_stopsign(None).unwrap();
+        return std::mem::take(&mut self.state_cache.stopsign);
     }
 
     pub(crate) fn get_stopsign(&self) -> Option<StopSign> {

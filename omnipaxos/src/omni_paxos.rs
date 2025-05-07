@@ -449,9 +449,20 @@ where
         latencies
     }
 
-    /// Become leader with the given ballot. Assumes no leader election.
-    pub fn initialize_prepare_phase(&mut self, n: Ballot) {
-        self.seq_paxos.handle_leader(n);
+    /// Manually attempt to become the leader by incrementing this instance's Ballot. Calling this
+    /// function may not result in gainig leadership if other instances are competing for
+    /// leadership with higher Ballots.
+    pub fn try_become_leader(&mut self) {
+        let mut my_ballot = self.ble.get_current_ballot();
+        let promise = self.seq_paxos.get_promise();
+        my_ballot.n = promise.n + 1;
+        self.seq_paxos.handle_leader(my_ballot);
+    }
+
+    /// Move to next instance configuration by consuming decided stopsign. Returns new decided
+    /// index.
+    pub fn move_to_next_instance(&mut self) -> usize {
+        self.seq_paxos.move_to_next_instance()
     }
 
     /// Check if this instance is the current leader in Accept phase.

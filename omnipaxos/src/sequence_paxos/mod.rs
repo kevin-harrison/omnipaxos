@@ -181,6 +181,25 @@ where
         }
     }
 
+    pub(crate) fn move_to_next_instance(&mut self) -> usize {
+        let next_config = self
+            .internal_storage
+            .remove_decided_stopsign()
+            .unwrap()
+            .next_config;
+        let reconfigured_quorum =
+            Quorum::with(next_config.flexible_quorum, next_config.nodes.len());
+        let next_quorum = QuorumConfig::Stable(reconfigured_quorum);
+        self.internal_storage
+            .append_quorum_config(next_quorum)
+            .expect(WRITE_ERROR_MSG);
+        let config_log = self.internal_storage.get_config_log();
+        self.internal_storage
+            .set_config_decided_idx(config_log.decided_idx + 1)
+            .expect(WRITE_ERROR_MSG);
+        return self.internal_storage.get_decided_idx();
+    }
+
     pub(crate) fn get_peers(&self) -> &Vec<NodeId> {
         &self.peers
     }
