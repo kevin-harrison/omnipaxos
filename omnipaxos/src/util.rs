@@ -328,6 +328,13 @@ where
             .count();
         current_quorum.is_accept_quorum(num_accepted)
     }
+
+    pub fn move_to_next_instance(&mut self, ballot: Ballot, idx: usize) {
+        self.n_leader = ballot;
+        for acc_idx in self.accepted_indexes.iter_mut() {
+            *acc_idx = idx;
+        }
+    }
 }
 
 /// The entry read in the log.
