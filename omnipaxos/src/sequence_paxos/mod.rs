@@ -201,11 +201,12 @@ where
         let mut promise = self.internal_storage.get_promise();
         let leader = self.internal_storage.get_leader();
         promise.n += 1;
-        self.internal_storage.set_promise(promise, leader)
+        self.internal_storage.set_promise(promise, leader);
         // Leader fixes its leader state
         if self.pid == leader {
             let decided_idx = self.internal_storage.get_decided_idx();
-            self.leader_state.move_to_next_instance(promise, decided_idx);
+            self.leader_state
+                .move_to_next_instance(promise, decided_idx);
         }
         return self.internal_storage.get_decided_idx();
     }
