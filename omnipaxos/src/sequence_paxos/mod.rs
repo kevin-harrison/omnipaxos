@@ -202,14 +202,15 @@ where
         let leader = self.internal_storage.get_leader();
         promise.n += 1;
         self.internal_storage.set_promise(promise, leader);
+        let buffered_proposals = std::mem::take(&mut self.buffered_proposals);
         if self.pid == leader {
             // Leader fixes its leader state
             let decided_idx = self.internal_storage.get_decided_idx();
             self.leader_state
                 .move_to_next_instance(promise, decided_idx);
-            self.accept_entries_leader(std::mem::take(&mut self.buffered_proposals));
+            self.accept_entries_leader(buffered_proposals);
         } else {
-            self.forward_proposals(std::mem::take(&mut self.buffered_proposals));
+            self.forward_proposals(buffered_proposals);
         }
         return self.internal_storage.get_decided_idx();
     }
